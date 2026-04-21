@@ -21,6 +21,14 @@ type chatMessage struct {
 	content string
 }
 
+const (
+	ansiReset          = "\x1b[0m"
+	ansiUserLabel      = "\x1b[38;5;67m"
+	ansiUserBody       = "\x1b[38;5;110m"
+	ansiAssistantLabel = "\x1b[38;5;65m"
+	ansiAssistantBody  = "\x1b[38;5;108m"
+)
+
 func main() {
 	modelPath := flag.String("model", "", "SML2 model path")
 	tokenizerPath := flag.String("tokenizer", "", "TOK2 tokenizer path")
@@ -109,9 +117,9 @@ func generate(t *model.Transformer, tok *tokenizer.Tokenizer, samp *sampler.Samp
 func chat(t *model.Transformer, tok *tokenizer.Tokenizer, samp *sampler.Sampler, userPrompt string, systemPrompt string, maxNew int) {
 	if userPrompt != "" {
 		messages := []chatMessage{{role: "user", content: userPrompt}}
-		fmt.Print("Assistant: ")
+		printAssistantPrefix(os.Stdout)
 		chatReply(t, tok, samp, renderChatPrompt(messages, systemPrompt), maxNew, os.Stdout)
-		fmt.Println()
+		fmt.Println(ansiReset)
 		return
 	}
 
@@ -120,10 +128,12 @@ func chat(t *model.Transformer, tok *tokenizer.Tokenizer, samp *sampler.Sampler,
 	logits, pos = forwardTokens(t, tok.Encode(renderSystemPrompt(systemPrompt), false, false), pos)
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
-		fmt.Print("User: ")
+		printUserPrefix(os.Stdout)
 		if !scanner.Scan() {
+			fmt.Print(ansiReset)
 			break
 		}
+		fmt.Print(ansiReset)
 		userPrompt := strings.TrimSpace(scanner.Text())
 		if userPrompt == "" {
 			continue
@@ -132,13 +142,21 @@ func chat(t *model.Transformer, tok *tokenizer.Tokenizer, samp *sampler.Sampler,
 			break
 		}
 		logits, pos = forwardTokens(t, tok.Encode(renderUserTurn(userPrompt), false, false), pos)
-		fmt.Print("Assistant: ")
+		printAssistantPrefix(os.Stdout)
 		_, pos = generateAssistant(t, tok, samp, logits, pos, maxNew, os.Stdout)
-		fmt.Println()
+		fmt.Println(ansiReset)
 	}
 	if err := scanner.Err(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func printUserPrefix(w io.Writer) {
+	fmt.Fprint(w, ansiUserLabel, "User: ", ansiUserBody)
+}
+
+func printAssistantPrefix(w io.Writer) {
+	fmt.Fprint(w, ansiAssistantLabel, "Assistant: ", ansiAssistantBody)
 }
 
 func chatReply(t *model.Transformer, tok *tokenizer.Tokenizer, samp *sampler.Sampler, rendered string, maxNew int, w io.Writer) string {
