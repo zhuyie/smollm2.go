@@ -1,11 +1,12 @@
 # smollm2.go
 
 Minimal Go implementation for inference [HuggingFaceTB/SmolLM2-360M-Instruct](https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct).
-Inspired by Andrej Karpathy's `llama2.c`.
+
+Inspired by Andrej Karpathy's [llama2.c](https://github.com/karpathy/llama2.c).
 
 The project is self-contained:
 
-- Python scripts convert Hugging Face files into compact local binary formats.
+- Python scripts convert Hugging Face weights into compact local binary formats.
 - Go code loads those binary files and runs inference.
 
 ## Layout
