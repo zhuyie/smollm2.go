@@ -1,0 +1,256 @@
+package tokenizer
+
+import (
+	"encoding/binary"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+	"unicode"
+)
+
+const (
+	tokenizerMagic      uint32 = 0x324b4f54 // TOK2
+	tokenizerVersion           = int32(1)
+	tokenizerHeaderSize        = int64(256)
+)
+
+type MergeRule struct {
+	Left  int
+	Right int
+	Out   int
+	Rank  int
+}
+
+type Tokenizer struct {
+	Vocab          []string
+	MergeRanks     map[[2]int]MergeRule
+	BOSID          int
+	EOSID          int
+	PADID          int
+	UNKID          int
+	MaxTokenLength int
+}
+
+func Load(path string, expectedVocabSize int) (*Tokenizer, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var magic uint32
+	var version int32
+	if err := binary.Read(file, binary.LittleEndian, &magic); err != nil {
+		return nil, err
+	}
+	if err := binary.Read(file, binary.LittleEndian, &version); err != nil {
+		return nil, err
+	}
+	if magic != tokenizerMagic || version != tokenizerVersion {
+		return nil, fmt.Errorf("bad tokenizer header: magic=%#x version=%d", magic, version)
+	}
+
+	var vocabSize, mergeCount, maxTokenLength, bosID, eosID, padID, unkID int32
+	for _, ptr := range []*int32{&vocabSize, &mergeCount, &maxTokenLength, &bosID, &eosID, &padID, &unkID} {
+		if err := binary.Read(file, binary.LittleEndian, ptr); err != nil {
+			return nil, err
+		}
+	}
+	if int(vocabSize) != expectedVocabSize {
+		return nil, fmt.Errorf("tokenizer vocab size %d does not match model vocab size %d", vocabSize, expectedVocabSize)
+	}
+	if _, err := file.Seek(tokenizerHeaderSize, io.SeekStart); err != nil {
+		return nil, err
+	}
+
+	tok := &Tokenizer{
+		Vocab:          make([]string, vocabSize),
+		MergeRanks:     make(map[[2]int]MergeRule, mergeCount),
+		BOSID:          int(bosID),
+		EOSID:          int(eosID),
+		PADID:          int(padID),
+		UNKID:          int(unkID),
+		MaxTokenLength: int(maxTokenLength),
+	}
+	for i := range tok.Vocab {
+		var n uint32
+		if err := binary.Read(file, binary.LittleEndian, &n); err != nil {
+			return nil, err
+		}
+		buf := make([]byte, n)
+		if _, err := io.ReadFull(file, buf); err != nil {
+			return nil, err
+		}
+		tok.Vocab[i] = string(buf)
+	}
+	for i := 0; i < int(mergeCount); i++ {
+		var left, right, out int32
+		if err := binary.Read(file, binary.LittleEndian, &left); err != nil {
+			return nil, err
+		}
+		if err := binary.Read(file, binary.LittleEndian, &right); err != nil {
+			return nil, err
+		}
+		if err := binary.Read(file, binary.LittleEndian, &out); err != nil {
+			return nil, err
+		}
+		rule := MergeRule{Left: int(left), Right: int(right), Out: int(out), Rank: i}
+		tok.MergeRanks[[2]int{rule.Left, rule.Right}] = rule
+	}
+	return tok, nil
+}
+
+func (t *Tokenizer) Encode(text string, bos bool, eos bool) []int {
+	var tokens []int
+	if bos && t.BOSID >= 0 {
+		tokens = append(tokens, t.BOSID)
+	}
+	for i := 0; i < len(text); {
+		if id, width, ok := t.matchSpecial(text, i); ok {
+			tokens = append(tokens, id)
+			i += width
+			continue
+		}
+		start := i
+		if text[i] == ' ' && i+1 < len(text) && text[i+1] != ' ' {
+			i++
+		}
+		kind := asciiKind(text[i])
+		i++
+		for i < len(text) && asciiKind(text[i]) == kind && !(kind == 3 && text[i] == ' ' && i+1 < len(text) && text[i+1] != ' ') {
+			if _, _, ok := t.matchSpecial(text, i); ok {
+				break
+			}
+			i++
+		}
+		tokens = append(tokens, t.encodePiece([]byte(text[start:i]))...)
+	}
+	if eos && t.EOSID >= 0 {
+		tokens = append(tokens, t.EOSID)
+	}
+	return tokens
+}
+
+func (t *Tokenizer) Decode(id int) string {
+	if id < 0 || id >= len(t.Vocab) {
+		return ""
+	}
+	piece := t.Vocab[id]
+	if strings.HasPrefix(piece, "<|") {
+		return piece
+	}
+	var out []byte
+	for _, r := range piece {
+		if b, ok := gpt2CodepointToByte(r); ok {
+			out = append(out, b)
+		}
+	}
+	return string(out)
+}
+
+func (t *Tokenizer) EOS() int {
+	return t.EOSID
+}
+
+func (t *Tokenizer) matchSpecial(text string, pos int) (int, int, bool) {
+	for _, id := range []int{t.BOSID, t.EOSID, t.UNKID, t.PADID} {
+		if id < 0 || id >= len(t.Vocab) {
+			continue
+		}
+		piece := t.Vocab[id]
+		if strings.HasPrefix(text[pos:], piece) {
+			return id, len(piece), true
+		}
+	}
+	return 0, 0, false
+}
+
+func (t *Tokenizer) encodePiece(bytes []byte) []int {
+	tokens := make([]int, 0, len(bytes))
+	for _, b := range bytes {
+		piece := string(gpt2ByteToRunes(b))
+		id := -1
+		for i, v := range t.Vocab {
+			if v == piece {
+				id = i
+				break
+			}
+		}
+		if id < 0 {
+			id = t.UNKID
+		}
+		tokens = append(tokens, id)
+	}
+	for {
+		bestIdx := -1
+		bestOut := -1
+		bestRank := int(^uint(0) >> 1)
+		for i := 0; i < len(tokens)-1; i++ {
+			if rule, ok := t.MergeRanks[[2]int{tokens[i], tokens[i+1]}]; ok && rule.Rank < bestRank {
+				bestIdx = i
+				bestOut = rule.Out
+				bestRank = rule.Rank
+			}
+		}
+		if bestIdx < 0 {
+			break
+		}
+		tokens[bestIdx] = bestOut
+		copy(tokens[bestIdx+1:], tokens[bestIdx+2:])
+		tokens = tokens[:len(tokens)-1]
+	}
+	return tokens
+}
+
+func asciiKind(b byte) int {
+	switch {
+	case b >= 'A' && b <= 'Z' || b >= 'a' && b <= 'z':
+		return 1
+	case b >= '0' && b <= '9':
+		return 2
+	case unicode.IsSpace(rune(b)):
+		return 3
+	default:
+		return 4
+	}
+}
+
+func gpt2ByteToRunes(b byte) []rune {
+	cp := gpt2ByteToCodepoint(b)
+	return []rune{cp}
+}
+
+func gpt2ByteToCodepoint(b byte) rune {
+	if (b >= 33 && b <= 126) || (b >= 161 && b <= 172) || (b >= 174 && b <= 255) {
+		return rune(b)
+	}
+	n := 0
+	for i := 0; i < 256; i++ {
+		if (i >= 33 && i <= 126) || (i >= 161 && i <= 172) || (i >= 174 && i <= 255) {
+			continue
+		}
+		if byte(i) == b {
+			return rune(256 + n)
+		}
+		n++
+	}
+	return rune(b)
+}
+
+func gpt2CodepointToByte(cp rune) (byte, bool) {
+	if (cp >= 33 && cp <= 126) || (cp >= 161 && cp <= 172) || (cp >= 174 && cp <= 255) {
+		return byte(cp), true
+	}
+	n := 0
+	for i := 0; i < 256; i++ {
+		if (i >= 33 && i <= 126) || (i >= 161 && i <= 172) || (i >= 174 && i <= 255) {
+			continue
+		}
+		if cp == rune(256+n) {
+			return byte(i), true
+		}
+		n++
+	}
+	return 0, false
+}
