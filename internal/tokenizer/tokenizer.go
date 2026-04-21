@@ -23,7 +23,9 @@ type MergeRule struct {
 }
 
 type Tokenizer struct {
-	Vocab          []string
+	Vocab []string
+	// TokenToID avoids scanning the full vocab when byte-level pieces are
+	// expanded into their initial token ids.
 	TokenToID      map[string]int
 	MergeRanks     map[[2]int]MergeRule
 	BOSID          int
@@ -88,6 +90,9 @@ func Load(path string, expectedVocabSize int) (*Tokenizer, error) {
 		tok.Vocab[i] = token
 		tok.TokenToID[token] = i
 	}
+
+	// Merge ranks are the byte-level BPE rules. Lower rank means the pair was
+	// learned earlier and should be merged first.
 	for i := 0; i < int(mergeCount); i++ {
 		var left, right, out int32
 		if err := binary.Read(file, binary.LittleEndian, &left); err != nil {
@@ -116,6 +121,8 @@ func (t *Tokenizer) Encode(text string, bos bool, eos bool) []int {
 			i += width
 			continue
 		}
+		// GPT-2 byte-level BPE first splits text with a regex-like pre-tokenizer.
+		// This compact implementation approximates that behavior for ASCII text.
 		start := i
 		if text[i] == ' ' && i+1 < len(text) && text[i+1] != ' ' {
 			i++
@@ -171,6 +178,8 @@ func (t *Tokenizer) matchSpecial(text string, pos int) (int, int, bool) {
 }
 
 func (t *Tokenizer) encodePiece(bytes []byte) []int {
+	// Initialize one token per byte using GPT-2's reversible byte-to-unicode
+	// mapping, then repeatedly apply the best-ranked adjacent merge.
 	tokens := make([]int, 0, len(bytes))
 	for _, b := range bytes {
 		piece := string(gpt2ByteToRunes(b))

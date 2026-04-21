@@ -15,28 +15,44 @@ const (
 )
 
 type Config struct {
-	Dim       int
+	// Dim is the residual stream width. Every token position carries one vector
+	// of this size through all transformer blocks.
+	Dim int
+	// HiddenDim is the intermediate width of the feed-forward network.
 	HiddenDim int
-	NLayers   int
-	NHeads    int
-	NKVHeads  int
+	// NLayers is the number of transformer blocks.
+	NLayers int
+	// NHeads is the number of query heads.
+	NHeads int
+	// NKVHeads is the number of key/value heads. This value may be smaller
+	// than NHeads when the model uses grouped-query attention.
+	NKVHeads int
+	// VocabSize is the number of tokenizer ids and output logits.
 	VocabSize int
-	SeqLen    int
+	// SeqLen is the maximum KV cache length supported by this checkpoint.
+	SeqLen int
+	// RopeTheta is the base frequency used by rotary positional embeddings.
 	RopeTheta float32
 }
 
 type LayerWeights struct {
+	// RMSNorm weights for the pre-attention and pre-FFN normalizations.
 	RMSAttWeight []float32
 	RMSFFNWeight []float32
-	WQ           []float32
-	WK           []float32
-	WV           []float32
-	WO           []float32
-	W1           []float32
-	W2           []float32
-	W3           []float32
+	// Attention projections. WQ outputs Dim values, while WK/WV output kvDim
+	// values because K/V only have NKVHeads heads.
+	WQ []float32
+	WK []float32
+	WV []float32
+	// WO projects concatenated attention head outputs back to Dim.
+	WO []float32
+	// Feed-forward projections for SwiGLU: W2(silu(W1(x)) * W3(x)).
+	W1 []float32
+	W2 []float32
+	W3 []float32
 }
 
+// Weights owns all model parameters.
 type Weights struct {
 	TokenEmbeddingTable []float32
 	Layers              []LayerWeights
@@ -45,6 +61,7 @@ type Weights struct {
 	SharedWeights       bool
 }
 
+// State contains the reusable scratch buffers and KV cache.
 type State struct {
 	X          []float32
 	XB         []float32
@@ -114,8 +131,10 @@ func Load(path string) (*Transformer, error) {
 		return nil, err
 	}
 
-	headSize := cfg.Dim / cfg.NHeads
 	kvDim := cfg.Dim * cfg.NKVHeads / cfg.NHeads
+
+	// Weight order must match export.py exactly. Matrices are stored row-major:
+	// each output channel owns one contiguous row consumed by matmul.
 	weights := Weights{SharedWeights: sharedWeights}
 	weights.TokenEmbeddingTable = readFloat32s(file, cfg.VocabSize*cfg.Dim)
 	weights.Layers = make([]LayerWeights, cfg.NLayers)
@@ -139,21 +158,22 @@ func Load(path string) (*Transformer, error) {
 	}
 
 	state := State{
-		X:          make([]float32, cfg.Dim),
-		XB:         make([]float32, cfg.Dim),
-		XB2:        make([]float32, cfg.Dim),
-		HB:         make([]float32, cfg.HiddenDim),
-		HB2:        make([]float32, cfg.HiddenDim),
-		Q:          make([]float32, cfg.Dim),
-		K:          make([]float32, kvDim),
-		V:          make([]float32, kvDim),
-		Att:        make([]float32, cfg.NHeads*cfg.SeqLen),
-		Logits:     make([]float32, cfg.VocabSize),
+		X:      make([]float32, cfg.Dim),
+		XB:     make([]float32, cfg.Dim),
+		XB2:    make([]float32, cfg.Dim),
+		HB:     make([]float32, cfg.HiddenDim),
+		HB2:    make([]float32, cfg.HiddenDim),
+		Q:      make([]float32, cfg.Dim),
+		K:      make([]float32, kvDim),
+		V:      make([]float32, kvDim),
+		Att:    make([]float32, cfg.NHeads*cfg.SeqLen),
+		Logits: make([]float32, cfg.VocabSize),
+		// KV cache layout: [layer][position][kvDim]. It is append-only along the
+		// position dimension during autoregressive decoding.
 		KeyCache:   make([]float32, cfg.NLayers*cfg.SeqLen*kvDim),
 		ValueCache: make([]float32, cfg.NLayers*cfg.SeqLen*kvDim),
 	}
 
-	_ = headSize
 	return &Transformer{Config: cfg, Weights: weights, State: state}, nil
 }
 
@@ -176,6 +196,27 @@ func readFloat32s(r io.Reader, count int) []float32 {
 	return data
 }
 
+// Forward evaluates one autoregressive decoding step.
+//
+// The caller passes the token id at absolute sequence position pos. During
+// prompt prefill, this function is called once per prompt token with increasing
+// pos. During generation, it is called once for each sampled token. In both
+// cases the function appends the current token's K/V vectors into the cache and
+// returns logits for the next token.
+//
+// The high-level flow is:
+//  1. Copy the token embedding into the residual stream s.X.
+//  2. For each layer:
+//     - RMS-normalize the residual stream for attention.
+//     - Project Q, K, and V; write K/V directly into the current cache slot.
+//     - Apply RoPE to Q and the newly written K.
+//     - Run causal self-attention over cached positions [0, pos].
+//     - Apply the attention output projection and residual add.
+//     - Run the RMSNorm + SwiGLU feed-forward block and residual add.
+//  3. Apply final RMSNorm and project to vocabulary logits.
+//
+// State buffers are reused in place; callers should treat the returned logits
+// slice as owned by the Transformer until the next Forward call.
 func (t *Transformer) Forward(token int, pos int) []float32 {
 	cfg := t.Config
 	w := t.Weights
@@ -186,20 +227,30 @@ func (t *Transformer) Forward(token int, pos int) []float32 {
 	hiddenDim := cfg.HiddenDim
 	headSize := dim / cfg.NHeads
 
+	// Start from the token embedding. The residual stream then flows through all
+	// transformer blocks in s.X.
 	copy(s.X, w.TokenEmbeddingTable[token*dim:(token+1)*dim])
 
 	for layer := 0; layer < cfg.NLayers; layer++ {
 		lw := w.Layers[layer]
+		// Attention sublayer starts with pre-norm, following the Llama-style
+		// transformer block layout.
 		rmsnorm(s.XB, s.X, lw.RMSAttWeight)
 
+		// Select the cache row for this layer and position. K/V matmul outputs
+		// below are written straight into these slices.
 		loff := layer * cfg.SeqLen * kvDim
 		kcache := s.KeyCache[loff+pos*kvDim : loff+(pos+1)*kvDim]
 		vcache := s.ValueCache[loff+pos*kvDim : loff+(pos+1)*kvDim]
 
+		// Query is transient for the current token; K/V persist in the cache so
+		// future positions can attend back to them.
 		matmul(s.Q, s.XB, lw.WQ, dim, dim)
 		matmul(kcache, s.XB, lw.WK, dim, kvDim)
 		matmul(vcache, s.XB, lw.WV, dim, kvDim)
 
+		// Apply RoPE to Q and K. Q has one vector per query head, while K only
+		// has NKVHeads vectors for grouped-query attention.
 		for i := 0; i < dim; i += 2 {
 			headDim := i % headSize
 			freq := float32(1.0 / math.Pow(float64(cfg.RopeTheta), float64(headDim)/float64(headSize)))
@@ -220,9 +271,12 @@ func (t *Transformer) Forward(token int, pos int) []float32 {
 			}
 		}
 
+		// Causal self-attention. Query heads share KV heads when NHeads>NKVHeads.
 		for h := 0; h < cfg.NHeads; h++ {
 			q := s.Q[h*headSize : (h+1)*headSize]
 			att := s.Att[h*cfg.SeqLen : (h+1)*cfg.SeqLen]
+			// Score this query head against every cached key up to pos. This is
+			// the only O(sequence length) part of a single-token decoding step.
 			for ts := 0; ts <= pos; ts++ {
 				k := s.KeyCache[loff+ts*kvDim+(h/kvMul)*headSize : loff+ts*kvDim+(h/kvMul+1)*headSize]
 				var score float32
@@ -233,6 +287,7 @@ func (t *Transformer) Forward(token int, pos int) []float32 {
 			}
 			softmax(att[:pos+1])
 
+			// Weighted sum of cached values produces this head's slice of s.XB.
 			xb := s.XB[h*headSize : (h+1)*headSize]
 			clear(xb)
 			for ts := 0; ts <= pos; ts++ {
@@ -244,11 +299,13 @@ func (t *Transformer) Forward(token int, pos int) []float32 {
 			}
 		}
 
+		// Attention output projection plus residual connection.
 		matmul(s.XB2, s.XB, lw.WO, dim, dim)
 		for i := 0; i < dim; i++ {
 			s.X[i] += s.XB2[i]
 		}
 
+		// SwiGLU feed-forward block: W2(silu(W1(x)) * W3(x)).
 		rmsnorm(s.XB, s.X, lw.RMSFFNWeight)
 		matmul(s.HB, s.XB, lw.W1, dim, hiddenDim)
 		matmul(s.HB2, s.XB, lw.W3, dim, hiddenDim)
@@ -299,6 +356,8 @@ func softmax(x []float32) {
 
 func matmul(out []float32, x []float32, w []float32, n int, d int) {
 	for i := 0; i < d; i++ {
+		// Four independent accumulators shorten the dependency chain in the dot
+		// product while staying plain Go and single-threaded.
 		var v0, v1, v2, v3 float32
 		row := w[i*n : (i+1)*n]
 		j := 0

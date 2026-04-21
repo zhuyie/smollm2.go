@@ -69,6 +69,7 @@ func generate(t *model.Transformer, tok *tokenizer.Tokenizer, samp *sampler.Samp
 	}
 	var logits []float32
 	pos := 0
+	// Prefill consumes the whole prompt and leaves logits for the next token.
 	for ; pos < len(ids) && pos < t.Config.SeqLen; pos++ {
 		logits = t.Forward(ids[pos], pos)
 	}
@@ -81,6 +82,7 @@ func generate(t *model.Transformer, tok *tokenizer.Tokenizer, samp *sampler.Samp
 			break
 		}
 		fmt.Print(tok.Decode(next))
+		// Decode one token at a time, appending its KV entries to the cache.
 		if token = next; token >= 0 {
 			logits = t.Forward(token, pos)
 			pos++
@@ -108,6 +110,7 @@ func chat(t *model.Transformer, tok *tokenizer.Tokenizer, samp *sampler.Sampler,
 	ids := tok.Encode(rendered, false, false)
 	pos := 0
 	var logits []float32
+	// Chat mode differs from generate mode only in prompt rendering.
 	for ; pos < len(ids) && pos < t.Config.SeqLen; pos++ {
 		logits = t.Forward(ids[pos], pos)
 	}
