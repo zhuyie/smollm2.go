@@ -1,6 +1,6 @@
 # smollm2.go
 
-Minimal Go implementation for inference `HuggingFaceTB/SmolLM2-360M-Instruct`.
+Minimal Go implementation for inference [HuggingFaceTB/SmolLM2-360M-Instruct](https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct).
 Inspired by Andrej Karpathy's `llama2.c`.
 
 The project is self-contained:
@@ -54,17 +54,7 @@ go build -o bin/smollm2 ./cmd/smollm2
 
 ## Run
 
-Encode a prompt:
-
-```sh
-bin/smollm2 \
-  -model models/smollm2-360m-instruct-f32.bin \
-  -tokenizer models/smollm2-tokenizer.bin \
-  -mode encode \
-  -prompt "Hello, my name is"
-```
-
-Chat:
+### Chat:
 
 ```sh
 bin/smollm2 \
@@ -82,14 +72,14 @@ Expected output:
 Assistant: 2 + 2 = 4.
 ```
 
-Generate:
+### Raw completion:
 
 ```sh
 bin/smollm2 \
   -model models/smollm2-360m-instruct-f32.bin \
   -tokenizer models/smollm2-tokenizer.bin \
   -mode generate \
-  -prompt "Hello, my name is" \
+  -prompt "A tiny robot found a lost key and" \
   -n 64 \
   -temp 0
 ```
