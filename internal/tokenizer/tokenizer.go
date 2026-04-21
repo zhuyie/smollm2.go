@@ -24,6 +24,7 @@ type MergeRule struct {
 
 type Tokenizer struct {
 	Vocab          []string
+	TokenToID      map[string]int
 	MergeRanks     map[[2]int]MergeRule
 	BOSID          int
 	EOSID          int
@@ -66,6 +67,7 @@ func Load(path string, expectedVocabSize int) (*Tokenizer, error) {
 
 	tok := &Tokenizer{
 		Vocab:          make([]string, vocabSize),
+		TokenToID:      make(map[string]int, vocabSize),
 		MergeRanks:     make(map[[2]int]MergeRule, mergeCount),
 		BOSID:          int(bosID),
 		EOSID:          int(eosID),
@@ -82,7 +84,9 @@ func Load(path string, expectedVocabSize int) (*Tokenizer, error) {
 		if _, err := io.ReadFull(file, buf); err != nil {
 			return nil, err
 		}
-		tok.Vocab[i] = string(buf)
+		token := string(buf)
+		tok.Vocab[i] = token
+		tok.TokenToID[token] = i
 	}
 	for i := 0; i < int(mergeCount); i++ {
 		var left, right, out int32
@@ -170,14 +174,8 @@ func (t *Tokenizer) encodePiece(bytes []byte) []int {
 	tokens := make([]int, 0, len(bytes))
 	for _, b := range bytes {
 		piece := string(gpt2ByteToRunes(b))
-		id := -1
-		for i, v := range t.Vocab {
-			if v == piece {
-				id = i
-				break
-			}
-		}
-		if id < 0 {
+		id, ok := t.TokenToID[piece]
+		if !ok {
 			id = t.UNKID
 		}
 		tokens = append(tokens, id)
