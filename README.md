@@ -1,6 +1,7 @@
 # smollm2.go
 
-Minimal Go runtime for `HuggingFaceTB/SmolLM2-360M-Instruct`.
+Minimal Go implementation for inference `HuggingFaceTB/SmolLM2-360M-Instruct`.
+Inspired by Andrej Karpathy's `llama2.c`.
 
 The project is self-contained:
 
@@ -17,7 +18,6 @@ internal/sampler/     greedy, multinomial, and top-p sampling
 export.py             Hugging Face model -> SML2 checkpoint
 export_tokenizer.py   Hugging Face tokenizer -> TOK2 tokenizer
 docs/CHECKPOINT.md    SML2/TOK2 binary format notes
-models/               generated model/tokenizer binaries
 ```
 
 ## Prepare Python Environment
@@ -93,11 +93,3 @@ bin/smollm2 \
   -n 64 \
   -temp 0
 ```
-
-## License
-
-This project is licensed under the MIT License. See [LICENSE](LICENSE).
-
-Generated model and tokenizer files under `models/` are not covered by this
-repository license; use them according to the license terms of the source model
-and tokenizer.
