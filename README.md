@@ -15,8 +15,7 @@ cmd/smollm2/          CLI entry point
 internal/model/       SML2 loader, weights, KV cache, forward pass
 internal/tokenizer/   TOK2 loader and byte-level BPE tokenizer
 internal/sampler/     greedy, multinomial, and top-p sampling
-export.py             Hugging Face model -> SML2 checkpoint
-export_tokenizer.py   Hugging Face tokenizer -> TOK2 tokenizer
+tools/                Hugging Face model/tokenizer export scripts
 docs/CHECKPOINT.md    SML2/TOK2 binary format notes
 ```
 
@@ -38,10 +37,10 @@ If you already have a Python environment with those packages, use that instead.
 ```sh
 mkdir -p models
 
-.venv/bin/python export.py models/smollm2-360m-instruct-f32.bin \
+.venv/bin/python tools/export.py models/smollm2-360m-instruct-f32.bin \
   --hf HuggingFaceTB/SmolLM2-360M-Instruct
 
-.venv/bin/python export_tokenizer.py models/smollm2-tokenizer.bin \
+.venv/bin/python tools/export_tokenizer.py models/smollm2-tokenizer.bin \
   --hf HuggingFaceTB/SmolLM2-360M-Instruct
 ```
 

@@ -133,7 +133,7 @@ func Load(path string) (*Transformer, error) {
 
 	kvDim := cfg.Dim * cfg.NKVHeads / cfg.NHeads
 
-	// Weight order must match export.py exactly. Matrices are stored row-major:
+	// Weight order must match tools/export.py exactly. Matrices are stored row-major:
 	// each output channel owns one contiguous row consumed by matmul.
 	weights := Weights{SharedWeights: sharedWeights}
 	weights.TokenEmbeddingTable = readFloat32s(file, cfg.VocabSize*cfg.Dim)
