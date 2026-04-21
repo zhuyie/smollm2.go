@@ -299,9 +299,17 @@ func softmax(x []float32) {
 
 func matmul(out []float32, x []float32, w []float32, n int, d int) {
 	for i := 0; i < d; i++ {
-		var val float32
+		var v0, v1, v2, v3 float32
 		row := w[i*n : (i+1)*n]
-		for j := 0; j < n; j++ {
+		j := 0
+		for ; j+3 < n; j += 4 {
+			v0 += row[j] * x[j]
+			v1 += row[j+1] * x[j+1]
+			v2 += row[j+2] * x[j+2]
+			v3 += row[j+3] * x[j+3]
+		}
+		val := v0 + v1 + v2 + v3
+		for ; j < n; j++ {
 			val += row[j] * x[j]
 		}
 		out[i] = val
