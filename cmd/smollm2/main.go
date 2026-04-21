@@ -110,12 +110,14 @@ func chat(t *model.Transformer, tok *tokenizer.Tokenizer, samp *sampler.Sampler,
 	if userPrompt != "" {
 		messages := []chatMessage{{role: "user", content: userPrompt}}
 		fmt.Print("Assistant: ")
-		chatReply(t, tok, samp, messages, systemPrompt, maxNew, os.Stdout)
+		chatReply(t, tok, samp, renderChatPrompt(messages, systemPrompt), maxNew, os.Stdout)
 		fmt.Println()
 		return
 	}
 
-	var messages []chatMessage
+	pos := 0
+	var logits []float32
+	logits, pos = forwardTokens(t, tok.Encode(renderSystemPrompt(systemPrompt), false, false), pos)
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
 		fmt.Print("User: ")
@@ -129,53 +131,72 @@ func chat(t *model.Transformer, tok *tokenizer.Tokenizer, samp *sampler.Sampler,
 		if userPrompt == "/exit" || userPrompt == "/quit" {
 			break
 		}
-		messages = append(messages, chatMessage{role: "user", content: userPrompt})
+		logits, pos = forwardTokens(t, tok.Encode(renderUserTurn(userPrompt), false, false), pos)
 		fmt.Print("Assistant: ")
-		reply := chatReply(t, tok, samp, messages, systemPrompt, maxNew, os.Stdout)
+		_, pos = generateAssistant(t, tok, samp, logits, pos, maxNew, os.Stdout)
 		fmt.Println()
-		messages = append(messages, chatMessage{role: "assistant", content: reply})
 	}
 	if err := scanner.Err(); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func chatReply(t *model.Transformer, tok *tokenizer.Tokenizer, samp *sampler.Sampler, messages []chatMessage, systemPrompt string, maxNew int, w io.Writer) string {
-	rendered := renderChatPrompt(messages, systemPrompt)
+func chatReply(t *model.Transformer, tok *tokenizer.Tokenizer, samp *sampler.Sampler, rendered string, maxNew int, w io.Writer) string {
 	ids := tok.Encode(rendered, false, false)
 	pos := 0
-	var logits []float32
 	// Chat mode differs from generate mode only in prompt rendering.
-	for ; pos < len(ids) && pos < t.Config.SeqLen; pos++ {
-		logits = t.Forward(ids[pos], pos)
-	}
+	logits, pos := forwardTokens(t, ids, pos)
+	out, _ := generateAssistant(t, tok, samp, logits, pos, maxNew, w)
+	return out
+}
+
+func generateAssistant(t *model.Transformer, tok *tokenizer.Tokenizer, samp *sampler.Sampler, logits []float32, pos int, maxNew int, w io.Writer) (string, int) {
 	var out strings.Builder
 	generated := 0
-	token := -1
 	for generated < maxNew && pos < t.Config.SeqLen {
 		next := samp.Sample(logits)
 		if next == tok.EOS() {
+			pos = closeAssistantTurn(t, tok, pos)
 			break
 		}
 		piece := tok.Decode(next)
 		fmt.Fprint(w, piece)
 		out.WriteString(piece)
-		token = next
-		logits = t.Forward(token, pos)
+		logits = t.Forward(next, pos)
 		pos++
 		generated++
 	}
-	return out.String()
+	if generated == maxNew && pos < t.Config.SeqLen {
+		pos = closeAssistantTurn(t, tok, pos)
+	}
+	return out.String(), pos
+}
+
+func closeAssistantTurn(t *model.Transformer, tok *tokenizer.Tokenizer, pos int) int {
+	if pos < t.Config.SeqLen {
+		t.Forward(tok.EOS(), pos)
+		pos++
+	}
+	ids := tok.Encode("\n", false, false)
+	for i := 0; i < len(ids) && pos < t.Config.SeqLen; i++ {
+		t.Forward(ids[i], pos)
+		pos++
+	}
+	return pos
+}
+
+func forwardTokens(t *model.Transformer, ids []int, pos int) ([]float32, int) {
+	var logits []float32
+	for i := 0; i < len(ids) && pos < t.Config.SeqLen; i++ {
+		logits = t.Forward(ids[i], pos)
+		pos++
+	}
+	return logits, pos
 }
 
 func renderChatPrompt(messages []chatMessage, systemPrompt string) string {
-	if systemPrompt == "" {
-		systemPrompt = "You are a helpful AI assistant named SmolLM, trained by Hugging Face"
-	}
 	var b strings.Builder
-	b.WriteString("<|im_start|>system\n")
-	b.WriteString(systemPrompt)
-	b.WriteString("<|im_end|>\n")
+	b.WriteString(renderSystemPrompt(systemPrompt))
 	for _, msg := range messages {
 		b.WriteString("<|im_start|>")
 		b.WriteString(msg.role)
@@ -185,6 +206,17 @@ func renderChatPrompt(messages []chatMessage, systemPrompt string) string {
 	}
 	b.WriteString("<|im_start|>assistant\n")
 	return b.String()
+}
+
+func renderSystemPrompt(systemPrompt string) string {
+	if systemPrompt == "" {
+		systemPrompt = "You are a helpful AI assistant named SmolLM, trained by Hugging Face"
+	}
+	return "<|im_start|>system\n" + systemPrompt + "<|im_end|>\n"
+}
+
+func renderUserTurn(userPrompt string) string {
+	return "<|im_start|>user\n" + userPrompt + "<|im_end|>\n<|im_start|>assistant\n"
 }
 
 func printTopLogits(t *model.Transformer, tok *tokenizer.Tokenizer, prompt string, k int) {
