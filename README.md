@@ -93,3 +93,11 @@ bin/smollm2 \
   -n 64 \
   -temp 0
 ```
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE).
+
+Generated model and tokenizer files under `models/` are not covered by this
+repository license; use them according to the license terms of the source model
+and tokenizer.
