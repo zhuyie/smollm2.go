@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"sort"
@@ -13,6 +15,11 @@ import (
 	"smollm2go/internal/sampler"
 	"smollm2go/internal/tokenizer"
 )
+
+type chatMessage struct {
+	role    string
+	content string
+}
 
 func main() {
 	modelPath := flag.String("model", "", "SML2 model path")
@@ -100,13 +107,41 @@ func generate(t *model.Transformer, tok *tokenizer.Tokenizer, samp *sampler.Samp
 }
 
 func chat(t *model.Transformer, tok *tokenizer.Tokenizer, samp *sampler.Sampler, userPrompt string, systemPrompt string, maxNew int) {
-	if userPrompt == "" {
-		fmt.Print("User: ")
-		if _, err := fmt.Scanln(&userPrompt); err != nil {
-			log.Fatal(err)
-		}
+	if userPrompt != "" {
+		messages := []chatMessage{{role: "user", content: userPrompt}}
+		fmt.Print("Assistant: ")
+		chatReply(t, tok, samp, messages, systemPrompt, maxNew, os.Stdout)
+		fmt.Println()
+		return
 	}
-	rendered := renderChatPrompt(userPrompt, systemPrompt)
+
+	var messages []chatMessage
+	scanner := bufio.NewScanner(os.Stdin)
+	for {
+		fmt.Print("User: ")
+		if !scanner.Scan() {
+			break
+		}
+		userPrompt := strings.TrimSpace(scanner.Text())
+		if userPrompt == "" {
+			continue
+		}
+		if userPrompt == "/exit" || userPrompt == "/quit" {
+			break
+		}
+		messages = append(messages, chatMessage{role: "user", content: userPrompt})
+		fmt.Print("Assistant: ")
+		reply := chatReply(t, tok, samp, messages, systemPrompt, maxNew, os.Stdout)
+		fmt.Println()
+		messages = append(messages, chatMessage{role: "assistant", content: reply})
+	}
+	if err := scanner.Err(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func chatReply(t *model.Transformer, tok *tokenizer.Tokenizer, samp *sampler.Sampler, messages []chatMessage, systemPrompt string, maxNew int, w io.Writer) string {
+	rendered := renderChatPrompt(messages, systemPrompt)
 	ids := tok.Encode(rendered, false, false)
 	pos := 0
 	var logits []float32
@@ -114,7 +149,7 @@ func chat(t *model.Transformer, tok *tokenizer.Tokenizer, samp *sampler.Sampler,
 	for ; pos < len(ids) && pos < t.Config.SeqLen; pos++ {
 		logits = t.Forward(ids[pos], pos)
 	}
-	fmt.Print("Assistant: ")
+	var out strings.Builder
 	generated := 0
 	token := -1
 	for generated < maxNew && pos < t.Config.SeqLen {
@@ -122,25 +157,33 @@ func chat(t *model.Transformer, tok *tokenizer.Tokenizer, samp *sampler.Sampler,
 		if next == tok.EOS() {
 			break
 		}
-		fmt.Print(tok.Decode(next))
+		piece := tok.Decode(next)
+		fmt.Fprint(w, piece)
+		out.WriteString(piece)
 		token = next
 		logits = t.Forward(token, pos)
 		pos++
 		generated++
 	}
-	fmt.Println()
+	return out.String()
 }
 
-func renderChatPrompt(userPrompt string, systemPrompt string) string {
+func renderChatPrompt(messages []chatMessage, systemPrompt string) string {
 	if systemPrompt == "" {
 		systemPrompt = "You are a helpful AI assistant named SmolLM, trained by Hugging Face"
 	}
 	var b strings.Builder
 	b.WriteString("<|im_start|>system\n")
 	b.WriteString(systemPrompt)
-	b.WriteString("<|im_end|>\n<|im_start|>user\n")
-	b.WriteString(userPrompt)
-	b.WriteString("<|im_end|>\n<|im_start|>assistant\n")
+	b.WriteString("<|im_end|>\n")
+	for _, msg := range messages {
+		b.WriteString("<|im_start|>")
+		b.WriteString(msg.role)
+		b.WriteByte('\n')
+		b.WriteString(msg.content)
+		b.WriteString("<|im_end|>\n")
+	}
+	b.WriteString("<|im_start|>assistant\n")
 	return b.String()
 }
 
