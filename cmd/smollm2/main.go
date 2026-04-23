@@ -22,11 +22,9 @@ type chatMessage struct {
 }
 
 const (
-	ansiReset          = "\x1b[0m"
-	ansiUserLabel      = "\x1b[38;5;67m"
-	ansiUserBody       = "\x1b[38;5;110m"
-	ansiAssistantLabel = "\x1b[38;5;65m"
-	ansiAssistantBody  = "\x1b[38;5;108m"
+	ansiReset     = "\x1b[0m"
+	ansiPrompt    = "\x1b[33m"
+	ansiUserInput = "\x1b[1m\x1b[32m"
 )
 
 func main() {
@@ -126,6 +124,8 @@ func chat(t *model.Transformer, tok *tokenizer.Tokenizer, samp *sampler.Sampler,
 	pos := 0
 	var logits []float32
 	logits, pos = forwardTokens(t, tok.Encode(renderSystemPrompt(systemPrompt), false, false), pos)
+	totalGenerated := 0
+	totalDuration := time.Duration(0)
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
 		printUserPrefix(os.Stdout)
@@ -139,24 +139,33 @@ func chat(t *model.Transformer, tok *tokenizer.Tokenizer, samp *sampler.Sampler,
 			continue
 		}
 		if userPrompt == "/exit" || userPrompt == "/quit" {
+			fmt.Println()
 			break
 		}
 		logits, pos = forwardTokens(t, tok.Encode(renderUserTurn(userPrompt), false, false), pos)
 		printAssistantPrefix(os.Stdout)
-		_, pos = generateAssistant(t, tok, samp, logits, pos, maxNew, os.Stdout)
+		var generated int
+		var duration time.Duration
+		_, pos, generated, duration = generateAssistant(t, tok, samp, logits, pos, maxNew, os.Stdout)
+		totalGenerated += generated
+		totalDuration += duration
 		fmt.Println(ansiReset)
 	}
 	if err := scanner.Err(); err != nil {
 		log.Fatal(err)
 	}
+	if totalGenerated > 1 && totalDuration > 0 {
+		tokPerSec := float64(totalGenerated) / totalDuration.Seconds()
+		fmt.Fprintf(os.Stderr, "achieved tok/s: %.6f\n", tokPerSec)
+	}
 }
 
 func printUserPrefix(w io.Writer) {
-	fmt.Fprint(w, ansiUserLabel, "User: ", ansiUserBody)
+	fmt.Fprint(w, ansiPrompt, "User: ", ansiUserInput)
 }
 
 func printAssistantPrefix(w io.Writer) {
-	fmt.Fprint(w, ansiAssistantLabel, "Assistant: ", ansiAssistantBody)
+	fmt.Fprint(w, ansiPrompt, "Assistant: ", ansiReset)
 }
 
 func chatReply(t *model.Transformer, tok *tokenizer.Tokenizer, samp *sampler.Sampler, rendered string, maxNew int, w io.Writer) string {
@@ -164,13 +173,14 @@ func chatReply(t *model.Transformer, tok *tokenizer.Tokenizer, samp *sampler.Sam
 	pos := 0
 	// Chat mode differs from generate mode only in prompt rendering.
 	logits, pos := forwardTokens(t, ids, pos)
-	out, _ := generateAssistant(t, tok, samp, logits, pos, maxNew, w)
+	out, _, _, _ := generateAssistant(t, tok, samp, logits, pos, maxNew, w)
 	return out
 }
 
-func generateAssistant(t *model.Transformer, tok *tokenizer.Tokenizer, samp *sampler.Sampler, logits []float32, pos int, maxNew int, w io.Writer) (string, int) {
+func generateAssistant(t *model.Transformer, tok *tokenizer.Tokenizer, samp *sampler.Sampler, logits []float32, pos int, maxNew int, w io.Writer) (string, int, int, time.Duration) {
 	var out strings.Builder
 	generated := 0
+	start := time.Now()
 	for generated < maxNew && pos < t.Config.SeqLen {
 		next := samp.Sample(logits)
 		if next == tok.EOS() {
@@ -187,7 +197,11 @@ func generateAssistant(t *model.Transformer, tok *tokenizer.Tokenizer, samp *sam
 	if generated == maxNew && pos < t.Config.SeqLen {
 		pos = closeAssistantTurn(t, tok, pos)
 	}
-	return out.String(), pos
+	duration := time.Duration(0)
+	if generated > 0 {
+		duration = time.Since(start)
+	}
+	return out.String(), pos, generated, duration
 }
 
 func closeAssistantTurn(t *model.Transformer, tok *tokenizer.Tokenizer, pos int) int {
