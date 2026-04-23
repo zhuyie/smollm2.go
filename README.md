@@ -1,6 +1,7 @@
 # smollm2.go
 
-Minimal Go implementation for inference [HuggingFaceTB/SmolLM2-360M-Instruct](https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct).
+Minimal Go implementation for inference with Hugging Face SmolLM2 Instruct models:
+[360M](https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct) and [1.7B](https://huggingface.co/HuggingFaceTB/SmolLM2-1.7B-Instruct).
 
 Inspired by Andrej Karpathy's [llama2.c](https://github.com/karpathy/llama2.c).
 
@@ -35,15 +36,30 @@ If you already have a Python environment with those packages, use that instead.
 
 ## Export Model And Tokenizer
 
+Create the output directory first:
+
 ```sh
 mkdir -p models
+```
 
+Export the small 360M model:
+
+```sh
 .venv/bin/python tools/export.py models/smollm2-360m-instruct-f32.bin \
   --hf HuggingFaceTB/SmolLM2-360M-Instruct
 
 .venv/bin/python tools/export_tokenizer.py models/smollm2-tokenizer.bin \
   --hf HuggingFaceTB/SmolLM2-360M-Instruct
 ```
+
+For a smarter model, export the 1.7B checkpoint:
+
+```sh
+.venv/bin/python tools/export.py models/smollm2-1.7b-instruct-f32.bin \
+  --hf HuggingFaceTB/SmolLM2-1.7B-Instruct
+```
+
+The tokenizer is shared by the SmolLM2 Instruct family, so it only needs to be exported once.
 
 ## Build
 
@@ -54,7 +70,7 @@ go build -o bin/smollm2 ./cmd/smollm2
 
 ## Run
 
-### Chat:
+### Chat
 
 ```sh
 bin/smollm2 \
@@ -62,7 +78,6 @@ bin/smollm2 \
   -tokenizer models/smollm2-tokenizer.bin \
   -mode chat \
   -prompt "What is 2+2?" \
-  -n 32 \
   -temp 0
 ```
 
@@ -72,7 +87,7 @@ Expected output:
 Assistant: 2 + 2 = 4.
 ```
 
-### Raw completion:
+### Raw Completion
 
 ```sh
 bin/smollm2 \
