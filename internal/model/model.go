@@ -355,11 +355,15 @@ func softmax(x []float32) {
 }
 
 func matmul(out []float32, x []float32, w []float32, n int, d int) {
-	for i := 0; i < d; i++ {
-		// Four independent accumulators shorten the dependency chain in the dot
-		// product while staying plain Go and single-threaded.
+	out = out[:d]
+	x = x[:n]
+	w = w[:d*n]
+	for i := range out {
+		// Four independent accumulators shorten the dependency chain
 		var v0, v1, v2, v3 float32
-		row := w[i*n : (i+1)*n]
+		// Advancing w row-by-row keeps bounds obvious to the compiler's BCE pass.
+		row := w[:n]
+		w = w[n:]
 		j := 0
 		for ; j+3 < n; j += 4 {
 			v0 += row[j] * x[j]
