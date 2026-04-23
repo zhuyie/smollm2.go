@@ -4,7 +4,9 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
+	"time"
 )
 
 func TestValidateConfig(t *testing.T) {
@@ -74,7 +76,10 @@ func TestMatmul(t *testing.T) {
 	}
 }
 
-func BenchmarkForward(b *testing.B) {
+var benchmarkLogits []float32
+
+func loadBenchmarkTransformer(b *testing.B) *Transformer {
+	b.Helper()
 	path := filepath.Join("..", "..", "models", "smollm2-360m-instruct-f32.bin")
 	if _, err := os.Stat(path); err != nil {
 		b.Skipf("model checkpoint not found: %s", path)
@@ -83,10 +88,82 @@ func BenchmarkForward(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
+	return t
+}
+
+func benchmarkTokens(vocabSize int, count int) []int {
+	tokens := make([]int, count)
+	for i := range tokens {
+		tokens[i] = (i*131 + 17) % vocabSize
+	}
+	return tokens
+}
+
+// BenchmarkForwardPositionSweep measures one-token Forward calls while cycling
+// through all cache positions. It is useful as a broad Forward regression test,
+// but it is not shaped like a real prefill or decode workload.
+func BenchmarkForwardPositionSweep(b *testing.B) {
+	t := loadBenchmarkTransformer(b)
 	token := 0
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		t.Forward(token, i%t.Config.SeqLen)
+		benchmarkLogits = t.Forward(token, i%t.Config.SeqLen)
+	}
+}
+
+// BenchmarkPrefill measures prompt ingestion from position 0. This matches the
+// model layer's current prefill behavior, where prompt tokens are processed one
+// at a time while filling the KV cache.
+func BenchmarkPrefill(b *testing.B) {
+	for _, promptLen := range []int{128, 512} {
+		b.Run(strconv.Itoa(promptLen), func(b *testing.B) {
+			t := loadBenchmarkTransformer(b)
+			if promptLen > t.Config.SeqLen {
+				b.Skipf("prompt length %d exceeds sequence length %d", promptLen, t.Config.SeqLen)
+			}
+			tokens := benchmarkTokens(t.Config.VocabSize, promptLen)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			start := time.Now()
+			for i := 0; i < b.N; i++ {
+				for pos, token := range tokens {
+					benchmarkLogits = t.Forward(token, pos)
+				}
+			}
+			elapsed := time.Since(start)
+			b.StopTimer()
+			b.ReportMetric(float64(b.N*promptLen)/elapsed.Seconds(), "tok/s")
+		})
+	}
+}
+
+// BenchmarkDecode measures the cost of generating one token after an existing
+// context has already populated the KV cache. Setup prefill is intentionally
+// outside the timed region.
+func BenchmarkDecode(b *testing.B) {
+	for _, contextLen := range []int{128, 512} {
+		b.Run(strconv.Itoa(contextLen), func(b *testing.B) {
+			t := loadBenchmarkTransformer(b)
+			if contextLen >= t.Config.SeqLen {
+				b.Skipf("context length %d leaves no decode position in sequence length %d", contextLen, t.Config.SeqLen)
+			}
+			tokens := benchmarkTokens(t.Config.VocabSize, contextLen+1)
+			for pos := 0; pos < contextLen; pos++ {
+				benchmarkLogits = t.Forward(tokens[pos], pos)
+			}
+			decodeToken := tokens[contextLen]
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			start := time.Now()
+			for i := 0; i < b.N; i++ {
+				benchmarkLogits = t.Forward(decodeToken, contextLen)
+			}
+			elapsed := time.Since(start)
+			b.StopTimer()
+			b.ReportMetric(float64(b.N)/elapsed.Seconds(), "tok/s")
+		})
 	}
 }
