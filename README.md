@@ -19,6 +19,7 @@ internal/tokenizer/   TOK2 loader and byte-level BPE tokenizer
 internal/sampler/     greedy, multinomial, and top-p sampling
 tools/                Hugging Face model/tokenizer export scripts
 docs/CHECKPOINT.md    SML2/TOK2 binary format notes
+docs/PERFORMANCE.md   inference optimization notes
 ```
 
 ## Prepare Python Environment
