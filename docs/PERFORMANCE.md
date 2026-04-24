@@ -60,7 +60,7 @@ run constantly during both prefill and decode.
 Code references:
 
 - [`internal/model/matmul_arm64.go`](../internal/model/matmul_arm64.go)
-- [`internal/model/matmul_arm64.s`](../internal/model/matmul_arm64.s)
+- [`internal/model/dot_arm64.s`](../internal/model/dot_arm64.s)
 - [`internal/model/dot_arm64.go`](../internal/model/dot_arm64.go)
 
 The dominant math shape in this runtime is matrix-vector multiply:
