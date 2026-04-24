@@ -261,6 +261,7 @@ func (t *Transformer) Forward(token int, pos int) []float32 {
 	hiddenDim := cfg.HiddenDim
 	headSize := dim / cfg.NHeads
 	headPairs := headSize / 2
+	attScale := float32(1.0 / math.Sqrt(float64(headSize)))
 	ropeCos := t.Tables.RopeCos[pos*headPairs : (pos+1)*headPairs]
 	ropeSin := t.Tables.RopeSin[pos*headPairs : (pos+1)*headPairs]
 
@@ -310,15 +311,13 @@ func (t *Transformer) Forward(token int, pos int) []float32 {
 		for h := 0; h < cfg.NHeads; h++ {
 			q := s.Q[h*headSize : (h+1)*headSize]
 			att := s.Att[h*cfg.SeqLen : (h+1)*cfg.SeqLen]
+			kvHead := h / kvMul
+			headOff := kvHead * headSize
 			// Score this query head against every cached key up to pos. This is
 			// the only O(sequence length) part of a single-token decoding step.
 			for ts := 0; ts <= pos; ts++ {
-				k := s.KeyCache[loff+ts*kvDim+(h/kvMul)*headSize : loff+ts*kvDim+(h/kvMul+1)*headSize]
-				var score float32
-				for i := 0; i < headSize; i++ {
-					score += q[i] * k[i]
-				}
-				att[ts] = score / float32(math.Sqrt(float64(headSize)))
+				k := s.KeyCache[loff+ts*kvDim+headOff : loff+ts*kvDim+headOff+headSize]
+				att[ts] = dotF32(q, k) * attScale
 			}
 			softmax(att[:pos+1])
 
@@ -326,7 +325,7 @@ func (t *Transformer) Forward(token int, pos int) []float32 {
 			xb := s.XB[h*headSize : (h+1)*headSize]
 			clear(xb)
 			for ts := 0; ts <= pos; ts++ {
-				v := s.ValueCache[loff+ts*kvDim+(h/kvMul)*headSize : loff+ts*kvDim+(h/kvMul+1)*headSize]
+				v := s.ValueCache[loff+ts*kvDim+headOff : loff+ts*kvDim+headOff+headSize]
 				a := att[ts]
 				for i := 0; i < headSize; i++ {
 					xb[i] += a * v[i]
