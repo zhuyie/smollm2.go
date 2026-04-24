@@ -60,6 +60,28 @@ func TestSoftmax(t *testing.T) {
 	}
 }
 
+func TestBuildRopeTables(t *testing.T) {
+	seqLen := 4
+	headSize := 8
+	ropeTheta := float32(10000)
+	cosTable, sinTable := buildRopeTables(seqLen, headSize, ropeTheta)
+	headPairs := headSize / 2
+	for pos := 0; pos < seqLen; pos++ {
+		for pair := 0; pair < headPairs; pair++ {
+			headDim := pair * 2
+			freq := float32(1.0 / math.Pow(float64(ropeTheta), float64(headDim)/float64(headSize)))
+			val := float32(pos) * freq
+			idx := pos*headPairs + pair
+			if got, want := cosTable[idx], float32(math.Cos(float64(val))); math.Abs(float64(got-want)) > 1e-6 {
+				t.Fatalf("cosTable[%d] = %f, want %f", idx, got, want)
+			}
+			if got, want := sinTable[idx], float32(math.Sin(float64(val))); math.Abs(float64(got-want)) > 1e-6 {
+				t.Fatalf("sinTable[%d] = %f, want %f", idx, got, want)
+			}
+		}
+	}
+}
+
 func TestMatmul(t *testing.T) {
 	x := []float32{2, 3, 5, 7, 11}
 	w := []float32{

@@ -77,10 +77,16 @@ type State struct {
 	ValueCache []float32
 }
 
+type Tables struct {
+	RopeCos []float32
+	RopeSin []float32
+}
+
 type Transformer struct {
 	Config  Config
 	Weights Weights
 	State   State
+	Tables  Tables
 }
 
 func Load(path string) (*Transformer, error) {
@@ -174,7 +180,18 @@ func Load(path string) (*Transformer, error) {
 		ValueCache: make([]float32, cfg.NLayers*cfg.SeqLen*kvDim),
 	}
 
-	return &Transformer{Config: cfg, Weights: weights, State: state}, nil
+	headSize := cfg.Dim / cfg.NHeads
+	ropeCos, ropeSin := buildRopeTables(cfg.SeqLen, headSize, cfg.RopeTheta)
+
+	return &Transformer{
+		Config:  cfg,
+		Weights: weights,
+		State:   state,
+		Tables: Tables{
+			RopeCos: ropeCos,
+			RopeSin: ropeSin,
+		},
+	}, nil
 }
 
 func validateConfig(cfg Config) error {
@@ -194,6 +211,23 @@ func readFloat32s(r io.Reader, count int) []float32 {
 		panic(err)
 	}
 	return data
+}
+
+func buildRopeTables(seqLen int, headSize int, ropeTheta float32) ([]float32, []float32) {
+	headPairs := headSize / 2
+	cosTable := make([]float32, seqLen*headPairs)
+	sinTable := make([]float32, seqLen*headPairs)
+	for pair := 0; pair < headPairs; pair++ {
+		headDim := pair * 2
+		freq := float32(1.0 / math.Pow(float64(ropeTheta), float64(headDim)/float64(headSize)))
+		for pos := 0; pos < seqLen; pos++ {
+			val := float32(pos) * freq
+			idx := pos*headPairs + pair
+			cosTable[idx] = float32(math.Cos(float64(val)))
+			sinTable[idx] = float32(math.Sin(float64(val)))
+		}
+	}
+	return cosTable, sinTable
 }
 
 // Forward evaluates one autoregressive decoding step.
@@ -226,6 +260,9 @@ func (t *Transformer) Forward(token int, pos int) []float32 {
 	kvMul := cfg.NHeads / cfg.NKVHeads
 	hiddenDim := cfg.HiddenDim
 	headSize := dim / cfg.NHeads
+	headPairs := headSize / 2
+	ropeCos := t.Tables.RopeCos[pos*headPairs : (pos+1)*headPairs]
+	ropeSin := t.Tables.RopeSin[pos*headPairs : (pos+1)*headPairs]
 
 	// Start from the token embedding. The residual stream then flows through all
 	// transformer blocks in s.X.
@@ -252,10 +289,8 @@ func (t *Transformer) Forward(token int, pos int) []float32 {
 		// Apply RoPE to Q and K. Q has one vector per query head, while K only
 		// has NKVHeads vectors for grouped-query attention.
 		for i := 0; i < dim; i += 2 {
-			headDim := i % headSize
-			freq := float32(1.0 / math.Pow(float64(cfg.RopeTheta), float64(headDim)/float64(headSize)))
-			val := float32(pos) * freq
-			fcr, fci := float32(math.Cos(float64(val))), float32(math.Sin(float64(val)))
+			pair := (i % headSize) / 2
+			fcr, fci := ropeCos[pair], ropeSin[pair]
 			rotn := 1
 			if i < kvDim {
 				rotn = 2
