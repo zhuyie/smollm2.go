@@ -99,3 +99,28 @@ bin/smollm2 \
   -n 64 \
   -temp 0
 ```
+
+### Tool Use Demo
+
+SmolLM2-1.7B-Instruct can emit function calls. This demo keeps the flow small:
+the CLI exposes two built-in tools, `get_current_hour` and
+`get_random_number_between`, asks the model to call the needed tools, runs them
+in Go, then sends the tool results back through the model for the final answer.
+
+```sh
+bin/smollm2 \
+  -model models/smollm2-1.7b-instruct-f32.bin \
+  -tokenizer models/smollm2-tokenizer.bin \
+  -mode toolcall \
+  -prompt "Can you give me the hour and a random number between 1 and 50?" \
+  -n 256 \
+  -temp 0
+```
+
+Example output:
+
+```text
+tool: get_random_number_between -> 27
+tool: get_current_hour -> 23
+The hour is 23 and the random number between 1 and 50 is 27.
+```

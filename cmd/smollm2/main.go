@@ -2,10 +2,12 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"os"
 	"sort"
 	"strings"
@@ -21,6 +23,16 @@ type chatMessage struct {
 	content string
 }
 
+type toolCallItem struct {
+	Name      string         `json:"name"`
+	Arguments map[string]any `json:"arguments"`
+}
+
+type toolResultItem struct {
+	Name   string
+	Result string
+}
+
 const (
 	ansiReset     = "\x1b[0m"
 	ansiPrompt    = "\x1b[33m"
@@ -30,7 +42,7 @@ const (
 func main() {
 	modelPath := flag.String("model", "", "SML2 model path")
 	tokenizerPath := flag.String("tokenizer", "", "TOK2 tokenizer path")
-	mode := flag.String("mode", "generate", "generate|chat|encode|logits")
+	mode := flag.String("mode", "generate", "generate|chat|toolcall|encode|logits")
 	prompt := flag.String("prompt", "", "input prompt")
 	systemPrompt := flag.String("system", "", "optional system prompt for chat")
 	maxNew := flag.Int("n", 256, "maximum new tokens")
@@ -59,6 +71,8 @@ func main() {
 		generate(transformer, tok, samp, *prompt, *maxNew)
 	case "chat":
 		chat(transformer, tok, samp, *prompt, *systemPrompt, *maxNew)
+	case "toolcall":
+		toolCall(transformer, tok, samp, *prompt, *maxNew)
 	case "encode":
 		ids := tok.Encode(*prompt, false, false)
 		for i, id := range ids {
@@ -160,6 +174,29 @@ func chat(t *model.Transformer, tok *tokenizer.Tokenizer, samp *sampler.Sampler,
 	}
 }
 
+func toolCall(t *model.Transformer, tok *tokenizer.Tokenizer, samp *sampler.Sampler, prompt string, maxNew int) {
+	if strings.TrimSpace(prompt) == "" {
+		log.Fatal("toolcall mode requires -prompt")
+	}
+	toolRequest := chatReply(t, tok, samp, renderToolCallPrompt(prompt), maxNew, io.Discard)
+	calls, err := parseToolCalls(toolRequest)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if len(calls) == 0 {
+		log.Fatal("model returned no tool calls")
+	}
+	results, err := runTools(calls)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, result := range results {
+		fmt.Fprintf(os.Stderr, "tool: %s -> %s\n", result.Name, result.Result)
+	}
+	chatReply(t, tok, samp, renderToolResultPrompt(prompt, toolRequest, results), maxNew, os.Stdout)
+	fmt.Println()
+}
+
 func printUserPrefix(w io.Writer) {
 	fmt.Fprint(w, ansiPrompt, "User: ", ansiUserInput)
 }
@@ -249,6 +286,133 @@ func renderSystemPrompt(systemPrompt string) string {
 
 func renderUserTurn(userPrompt string) string {
 	return "<|im_start|>user\n" + userPrompt + "<|im_end|>\n<|im_start|>assistant\n"
+}
+
+func renderToolCallPrompt(userPrompt string) string {
+	systemPrompt := `You are an expert in composing functions. You are given a question and a set of possible functions.
+Based on the question, you will need to make one or more function/tool calls to achieve the purpose.
+If none of the functions can be used, point it out and refuse to answer.
+If the given question lacks the parameters required by the function, also point it out.
+
+You have access to the following tools:
+<tools>[{"type":"function","function":{"name":"get_random_number_between","description":"Gets a random integer between two numeric bounds.","parameters":{"type":"object","properties":{"min":{"type":"integer","description":"The minimum numeric bound."},"max":{"type":"integer","description":"The maximum numeric bound."}},"required":["min","max"]}}},{"type":"function","function":{"name":"get_current_hour","description":"Returns only the current hour of day in 24-hour format, such as 07 or 22.","parameters":{"type":"object","properties":{},"required":[]}}}]</tools>
+
+The output MUST strictly adhere to the following format, and NO other text MUST be included.
+The example format is as follows. Please make sure the parameter type is correct. If no function call is needed, please make the tool calls an empty list '[]'.
+<tool_call>[
+{"name": "func_name1", "arguments": {"argument1": "value1", "argument2": "value2"}}
+]</tool_call>`
+	return renderChatPrompt([]chatMessage{{role: "user", content: userPrompt}}, systemPrompt)
+}
+
+func renderToolResultPrompt(userPrompt string, _ string, results []toolResultItem) string {
+	systemPrompt := `You are a helpful AI assistant.
+The conversation includes an assistant tool call followed by a tool result.
+Use the tool result to answer the user's original request.
+If there are multiple tool results, include all of them in the answer.
+Do not call tools again.`
+	names := make([]string, 0, len(results))
+	for _, result := range results {
+		names = append(names, result.Name)
+	}
+	messages := []chatMessage{
+		{role: "user", content: userPrompt},
+		{role: "assistant", content: "I called these tools: " + strings.Join(names, ", ") + "."},
+	}
+	var toolOut strings.Builder
+	for _, result := range results {
+		if toolOut.Len() > 0 {
+			toolOut.WriteByte('\n')
+		}
+		toolOut.WriteString(result.Name)
+		toolOut.WriteString(" result: ")
+		toolOut.WriteString(result.Result)
+	}
+	messages = append(messages, chatMessage{role: "tool", content: toolOut.String()})
+	return renderChatPrompt(messages, systemPrompt)
+}
+
+func parseToolCalls(text string) ([]toolCallItem, error) {
+	const startTag = "<tool_call>"
+	const endTag = "</tool_call>"
+	start := strings.Index(text, startTag)
+	if start < 0 {
+		return nil, fmt.Errorf("missing %s in model output", startTag)
+	}
+	start += len(startTag)
+	end := strings.Index(text[start:], endTag)
+	if end < 0 {
+		return nil, fmt.Errorf("missing %s in model output", endTag)
+	}
+	payload := strings.TrimSpace(text[start : start+end])
+	var calls []toolCallItem
+	if err := json.Unmarshal([]byte(payload), &calls); err != nil {
+		return nil, fmt.Errorf("invalid tool call JSON: %w", err)
+	}
+	for i, call := range calls {
+		if call.Name == "" {
+			return nil, fmt.Errorf("tool call %d missing name", i)
+		}
+		if call.Arguments == nil {
+			return nil, fmt.Errorf("tool call %d missing arguments object", i)
+		}
+	}
+	return calls, nil
+}
+
+func runTools(calls []toolCallItem) ([]toolResultItem, error) {
+	results := make([]toolResultItem, 0, len(calls))
+	for _, call := range calls {
+		result, err := runTool(call)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, toolResultItem{Name: call.Name, Result: result})
+	}
+	return results, nil
+}
+
+func runTool(call toolCallItem) (string, error) {
+	switch call.Name {
+	case "get_current_hour":
+		if len(call.Arguments) != 0 {
+			return "", fmt.Errorf("get_current_hour does not take arguments")
+		}
+		return time.Now().Format("15"), nil
+	case "get_random_number_between":
+		minVal, err := intArgument(call, "min")
+		if err != nil {
+			return "", err
+		}
+		maxVal, err := intArgument(call, "max")
+		if err != nil {
+			return "", err
+		}
+		if minVal > maxVal {
+			return "", fmt.Errorf("min must be <= max")
+		}
+		return fmt.Sprint(rand.Intn(maxVal-minVal+1) + minVal), nil
+	default:
+		return "", fmt.Errorf("unknown tool %q", call.Name)
+	}
+}
+
+func intArgument(call toolCallItem, name string) (int, error) {
+	value, ok := call.Arguments[name]
+	if !ok {
+		return 0, fmt.Errorf("%s missing argument %q", call.Name, name)
+	}
+	switch v := value.(type) {
+	case float64:
+		if v != float64(int(v)) {
+			return 0, fmt.Errorf("%s argument %q must be an integer", call.Name, name)
+		}
+		return int(v), nil
+	case int:
+		return v, nil
+	default:
+		return 0, fmt.Errorf("%s argument %q must be an integer", call.Name, name)
+	}
 }
 
 func printTopLogits(t *model.Transformer, tok *tokenizer.Tokenizer, prompt string, k int) {
