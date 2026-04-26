@@ -115,7 +115,19 @@ func matmulBatch(out []float32, x []float32, w []float32, batch int, n int, d in
 func matmulBatchRows(out []float32, x []float32, w []float32, batch int, n int, d int, row0 int, row1 int) {
 	for row := row0; row < row1; row++ {
 		weight := w[row*n : (row+1)*n]
-		for b := 0; b < batch; b++ {
+		b := 0
+		for ; b+3 < batch; b += 4 {
+			x0 := x[b*n : (b+1)*n]
+			x1 := x[(b+1)*n : (b+2)*n]
+			x2 := x[(b+2)*n : (b+3)*n]
+			x3 := x[(b+3)*n : (b+4)*n]
+			v0, v1, v2, v3 := dotF32Batch4(x0, x1, x2, x3, weight)
+			out[b*d+row] = v0
+			out[(b+1)*d+row] = v1
+			out[(b+2)*d+row] = v2
+			out[(b+3)*d+row] = v3
+		}
+		for ; b < batch; b++ {
 			out[b*d+row] = dotF32(x[b*n:(b+1)*n], weight)
 		}
 	}

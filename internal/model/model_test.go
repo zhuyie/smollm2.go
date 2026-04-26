@@ -79,6 +79,37 @@ func TestAddScaledF32(t *testing.T) {
 	}
 }
 
+func TestDotF32Batch4(t *testing.T) {
+	for _, n := range []int{4, 8, 64, 65} {
+		x0 := make([]float32, n)
+		x1 := make([]float32, n)
+		x2 := make([]float32, n)
+		x3 := make([]float32, n)
+		w := make([]float32, n)
+		for i := range w {
+			x0[i] = float32((i%7)-3) / 7
+			x1[i] = float32((i%11)-5) / 11
+			x2[i] = float32((i%13)-6) / 13
+			x3[i] = float32((i%17)-8) / 17
+			w[i] = float32((i%19)-9) / 19
+		}
+
+		got0, got1, got2, got3 := dotF32Batch4(x0, x1, x2, x3, w)
+		want := []float32{
+			dotF32Scalar(x0, w),
+			dotF32Scalar(x1, w),
+			dotF32Scalar(x2, w),
+			dotF32Scalar(x3, w),
+		}
+		got := []float32{got0, got1, got2, got3}
+		for i := range want {
+			if math.Abs(float64(got[i]-want[i])) > 1e-4 {
+				t.Fatalf("n=%d got[%d] = %f, want %f", n, i, got[i], want[i])
+			}
+		}
+	}
+}
+
 func TestBuildRopeTables(t *testing.T) {
 	seqLen := 4
 	headSize := 8

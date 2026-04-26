@@ -29,6 +29,17 @@ func matmulScalar(out []float32, x []float32, w []float32, n int, d int) {
 	}
 }
 
+func dotF32Batch4Scalar(x0 []float32, x1 []float32, x2 []float32, x3 []float32, w []float32) (float32, float32, float32, float32) {
+	var v0, v1, v2, v3 float32
+	for i, weight := range w {
+		v0 += x0[i] * weight
+		v1 += x1[i] * weight
+		v2 += x2[i] * weight
+		v3 += x3[i] * weight
+	}
+	return v0, v1, v2, v3
+}
+
 func addScaledF32Scalar(dst []float32, src []float32, scale float32) {
 	n := min(len(dst), len(src))
 	dst = dst[:n]
