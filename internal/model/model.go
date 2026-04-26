@@ -63,26 +63,21 @@ type Weights struct {
 
 // State contains the reusable scratch buffers and KV cache.
 type State struct {
-	X          []float32
-	XB         []float32
-	XB2        []float32
-	HB         []float32
-	HB2        []float32
-	Q          []float32
-	K          []float32
-	V          []float32
-	Att        []float32
-	Logits     []float32
-	KeyCache   []float32
-	ValueCache []float32
-	BatchX     []float32
-	BatchXB    []float32
-	BatchXB2   []float32
-	BatchQ     []float32
-	BatchK     []float32
-	BatchV     []float32
-	BatchHB    []float32
-	BatchHB2   []float32
+	X           []float32
+	XB          []float32
+	XB2         []float32
+	HB          []float32
+	HB2         []float32
+	Q           []float32
+	K           []float32
+	V           []float32
+	Att         []float32
+	Logits      []float32
+	KeyCache    []float32
+	ValueCache  []float32
+	BatchDim    []float32
+	BatchKVDim  []float32
+	BatchHidden []float32
 }
 
 type Tables struct {
@@ -392,14 +387,17 @@ func (t *Transformer) Prefill(tokens []int, startPos int) []float32 {
 	}
 	t.ensureBatch(batch)
 
-	x := s.BatchX[:batch*dim]
-	xb := s.BatchXB[:batch*dim]
-	xb2 := s.BatchXB2[:batch*dim]
-	qb := s.BatchQ[:batch*dim]
-	kb := s.BatchK[:batch*kvDim]
-	vb := s.BatchV[:batch*kvDim]
-	hb := s.BatchHB[:batch*hiddenDim]
-	hb2 := s.BatchHB2[:batch*hiddenDim]
+	batchDim := s.BatchDim[:4*batch*dim]
+	x := batchDim[0 : batch*dim]
+	xb := batchDim[batch*dim : 2*batch*dim]
+	xb2 := batchDim[2*batch*dim : 3*batch*dim]
+	qb := batchDim[3*batch*dim : 4*batch*dim]
+	batchKVDim := s.BatchKVDim[:2*batch*kvDim]
+	kb := batchKVDim[0 : batch*kvDim]
+	vb := batchKVDim[batch*kvDim : 2*batch*kvDim]
+	batchHidden := s.BatchHidden[:2*batch*hiddenDim]
+	hb := batchHidden[0 : batch*hiddenDim]
+	hb2 := batchHidden[batch*hiddenDim : 2*batch*hiddenDim]
 
 	for b, token := range tokens {
 		copy(x[b*dim:(b+1)*dim], w.TokenEmbeddingTable[token*dim:(token+1)*dim])
@@ -500,19 +498,14 @@ func (t *Transformer) ensureBatch(batch int) {
 	kvDim := cfg.Dim * cfg.NKVHeads / cfg.NHeads
 	hiddenDim := cfg.HiddenDim
 	s := &t.State
-	if cap(s.BatchX) < batch*dim {
-		s.BatchX = make([]float32, batch*dim)
-		s.BatchXB = make([]float32, batch*dim)
-		s.BatchXB2 = make([]float32, batch*dim)
-		s.BatchQ = make([]float32, batch*dim)
+	if cap(s.BatchDim) < 4*batch*dim {
+		s.BatchDim = make([]float32, 4*batch*dim)
 	}
-	if cap(s.BatchK) < batch*kvDim {
-		s.BatchK = make([]float32, batch*kvDim)
-		s.BatchV = make([]float32, batch*kvDim)
+	if cap(s.BatchKVDim) < 2*batch*kvDim {
+		s.BatchKVDim = make([]float32, 2*batch*kvDim)
 	}
-	if cap(s.BatchHB) < batch*hiddenDim {
-		s.BatchHB = make([]float32, batch*hiddenDim)
-		s.BatchHB2 = make([]float32, batch*hiddenDim)
+	if cap(s.BatchHidden) < 2*batch*hiddenDim {
+		s.BatchHidden = make([]float32, 2*batch*hiddenDim)
 	}
 }
 
