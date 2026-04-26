@@ -75,6 +75,14 @@ type State struct {
 	Logits     []float32
 	KeyCache   []float32
 	ValueCache []float32
+	BatchX     []float32
+	BatchXB    []float32
+	BatchXB2   []float32
+	BatchQ     []float32
+	BatchK     []float32
+	BatchV     []float32
+	BatchHB    []float32
+	BatchHB2   []float32
 }
 
 type Tables struct {
@@ -357,6 +365,157 @@ func (t *Transformer) Forward(token int, pos int) []float32 {
 	return s.Logits
 }
 
+// Prefill consumes a contiguous prompt span and returns logits for the next
+// token after the final prompt token. It keeps decode state compatible with
+// Forward by filling the same KV cache.
+func (t *Transformer) Prefill(tokens []int, startPos int) []float32 {
+	if len(tokens) == 0 {
+		return nil
+	}
+	if len(tokens) == 1 {
+		return t.Forward(tokens[0], startPos)
+	}
+
+	cfg := t.Config
+	w := t.Weights
+	s := &t.State
+	dim := cfg.Dim
+	kvDim := cfg.Dim * cfg.NKVHeads / cfg.NHeads
+	kvMul := cfg.NHeads / cfg.NKVHeads
+	hiddenDim := cfg.HiddenDim
+	headSize := dim / cfg.NHeads
+	headPairs := headSize / 2
+	attScale := float32(1.0 / math.Sqrt(float64(headSize)))
+	batch := len(tokens)
+	if startPos < 0 || startPos+batch > cfg.SeqLen {
+		panic("prefill range exceeds sequence length")
+	}
+	t.ensureBatch(batch)
+
+	x := s.BatchX[:batch*dim]
+	xb := s.BatchXB[:batch*dim]
+	xb2 := s.BatchXB2[:batch*dim]
+	qb := s.BatchQ[:batch*dim]
+	kb := s.BatchK[:batch*kvDim]
+	vb := s.BatchV[:batch*kvDim]
+	hb := s.BatchHB[:batch*hiddenDim]
+	hb2 := s.BatchHB2[:batch*hiddenDim]
+
+	for b, token := range tokens {
+		copy(x[b*dim:(b+1)*dim], w.TokenEmbeddingTable[token*dim:(token+1)*dim])
+	}
+
+	for layer := 0; layer < cfg.NLayers; layer++ {
+		lw := w.Layers[layer]
+		rmsnormBatch(xb, x, lw.RMSAttWeight, batch, dim)
+		matmulBatch(qb, xb, lw.WQ, batch, dim, dim)
+		matmulBatch(kb, xb, lw.WK, batch, dim, kvDim)
+		matmulBatch(vb, xb, lw.WV, batch, dim, kvDim)
+
+		loff := layer * cfg.SeqLen * kvDim
+		for b := 0; b < batch; b++ {
+			pos := startPos + b
+			q := qb[b*dim : (b+1)*dim]
+			krow := kb[b*kvDim : (b+1)*kvDim]
+			vrow := vb[b*kvDim : (b+1)*kvDim]
+			kcache := s.KeyCache[loff+pos*kvDim : loff+(pos+1)*kvDim]
+			vcache := s.ValueCache[loff+pos*kvDim : loff+(pos+1)*kvDim]
+			copy(kcache, krow)
+			copy(vcache, vrow)
+
+			ropeCos := t.Tables.RopeCos[pos*headPairs : (pos+1)*headPairs]
+			ropeSin := t.Tables.RopeSin[pos*headPairs : (pos+1)*headPairs]
+			for i := 0; i < dim; i += 2 {
+				pair := (i % headSize) / 2
+				fcr, fci := ropeCos[pair], ropeSin[pair]
+				rotn := 1
+				if i < kvDim {
+					rotn = 2
+				}
+				for v := 0; v < rotn; v++ {
+					vec := q
+					if v == 1 {
+						vec = kcache
+					}
+					v0, v1 := vec[i], vec[i+1]
+					vec[i] = v0*fcr - v1*fci
+					vec[i+1] = v0*fci + v1*fcr
+				}
+			}
+		}
+
+		for b := 0; b < batch; b++ {
+			pos := startPos + b
+			qrow := qb[b*dim : (b+1)*dim]
+			xbrow := xb[b*dim : (b+1)*dim]
+			for h := 0; h < cfg.NHeads; h++ {
+				q := qrow[h*headSize : (h+1)*headSize]
+				att := s.Att[h*cfg.SeqLen : (h+1)*cfg.SeqLen]
+				kvHead := h / kvMul
+				headOff := kvHead * headSize
+				for ts := 0; ts <= pos; ts++ {
+					k := s.KeyCache[loff+ts*kvDim+headOff : loff+ts*kvDim+headOff+headSize]
+					att[ts] = dotF32(q, k) * attScale
+				}
+				softmax(att[:pos+1])
+
+				xbh := xbrow[h*headSize : (h+1)*headSize]
+				clear(xbh)
+				for ts := 0; ts <= pos; ts++ {
+					v := s.ValueCache[loff+ts*kvDim+headOff : loff+ts*kvDim+headOff+headSize]
+					addScaledF32(xbh, v, att[ts])
+				}
+			}
+		}
+
+		matmulBatch(xb2, xb, lw.WO, batch, dim, dim)
+		for i := range x {
+			x[i] += xb2[i]
+		}
+
+		rmsnormBatch(xb, x, lw.RMSFFNWeight, batch, dim)
+		matmulBatch(hb, xb, lw.W1, batch, dim, hiddenDim)
+		matmulBatch(hb2, xb, lw.W3, batch, dim, hiddenDim)
+		for i := range hb {
+			val := hb[i]
+			val *= 1.0 / (1.0 + float32(math.Exp(float64(-val))))
+			hb[i] = val * hb2[i]
+		}
+		matmulBatch(xb, hb, lw.W2, batch, hiddenDim, dim)
+		for i := range x {
+			x[i] += xb[i]
+		}
+	}
+
+	last := x[(batch-1)*dim : batch*dim]
+	copy(s.X, last)
+	rmsnorm(s.X, s.X, w.RMSFinalWeight)
+	matmul(s.Logits, s.X, w.WCls, dim, cfg.VocabSize)
+	return s.Logits
+}
+
+func (t *Transformer) ensureBatch(batch int) {
+	cfg := t.Config
+	dim := cfg.Dim
+	kvDim := cfg.Dim * cfg.NKVHeads / cfg.NHeads
+	hiddenDim := cfg.HiddenDim
+	s := &t.State
+	if cap(s.BatchX) < batch*dim {
+		s.BatchX = make([]float32, batch*dim)
+		s.BatchXB = make([]float32, batch*dim)
+		s.BatchXB2 = make([]float32, batch*dim)
+		s.BatchQ = make([]float32, batch*dim)
+	}
+	if cap(s.BatchK) < batch*kvDim {
+		s.BatchK = make([]float32, batch*kvDim)
+		s.BatchV = make([]float32, batch*kvDim)
+	}
+	if cap(s.BatchHB) < batch*hiddenDim {
+		s.BatchHB = make([]float32, batch*hiddenDim)
+		s.BatchHB2 = make([]float32, batch*hiddenDim)
+	}
+}
+
 func rmsnorm(out []float32, x []float32, weight []float32) {
 	var ss float32
 	for _, v := range x {
@@ -366,6 +525,12 @@ func rmsnorm(out []float32, x []float32, weight []float32) {
 	scale := float32(1.0 / math.Sqrt(float64(ss)))
 	for i := range x {
 		out[i] = weight[i] * scale * x[i]
+	}
+}
+
+func rmsnormBatch(out []float32, x []float32, weight []float32, batch int, dim int) {
+	for b := 0; b < batch; b++ {
+		rmsnorm(out[b*dim:(b+1)*dim], x[b*dim:(b+1)*dim], weight)
 	}
 }
 

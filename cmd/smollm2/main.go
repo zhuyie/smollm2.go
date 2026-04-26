@@ -97,8 +97,10 @@ func generate(t *model.Transformer, tok *tokenizer.Tokenizer, samp *sampler.Samp
 	var logits []float32
 	pos := 0
 	// Prefill consumes the whole prompt and leaves logits for the next token.
-	for ; pos < len(ids) && pos < t.Config.SeqLen; pos++ {
-		logits = t.Forward(ids[pos], pos)
+	if len(ids) > 0 && pos < t.Config.SeqLen {
+		end := min(len(ids), t.Config.SeqLen)
+		logits = t.Prefill(ids[:end], pos)
+		pos = end
 	}
 	generated := 0
 	token := -1
@@ -255,12 +257,11 @@ func closeAssistantTurn(t *model.Transformer, tok *tokenizer.Tokenizer, pos int)
 }
 
 func forwardTokens(t *model.Transformer, ids []int, pos int) ([]float32, int) {
-	var logits []float32
-	for i := 0; i < len(ids) && pos < t.Config.SeqLen; i++ {
-		logits = t.Forward(ids[i], pos)
-		pos++
+	if len(ids) == 0 || pos >= t.Config.SeqLen {
+		return nil, pos
 	}
-	return logits, pos
+	end := min(len(ids), t.Config.SeqLen-pos)
+	return t.Prefill(ids[:end], pos), pos + end
 }
 
 func renderChatPrompt(messages []chatMessage, systemPrompt string) string {
@@ -420,10 +421,8 @@ func printTopLogits(t *model.Transformer, tok *tokenizer.Tokenizer, prompt strin
 	if len(ids) == 0 {
 		log.Fatal("empty prompt")
 	}
-	var logits []float32
-	for pos, id := range ids {
-		logits = t.Forward(id, pos)
-	}
+	end := min(len(ids), t.Config.SeqLen)
+	logits := t.Prefill(ids[:end], 0)
 	type item struct {
 		id  int
 		val float32

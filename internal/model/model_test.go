@@ -117,6 +117,86 @@ func TestMatmul(t *testing.T) {
 	}
 }
 
+func TestPrefillMatchesForwardLoop(t *testing.T) {
+	cfg := Config{
+		Dim:       8,
+		HiddenDim: 16,
+		NLayers:   2,
+		NHeads:    2,
+		NKVHeads:  1,
+		VocabSize: 17,
+		SeqLen:    16,
+		RopeTheta: 10000,
+	}
+	t1 := newTestTransformer(cfg)
+	t2 := newTestTransformer(cfg)
+	tokens := []int{1, 5, 9, 3, 7}
+
+	var loopLogits []float32
+	for pos, token := range tokens {
+		loopLogits = t1.Forward(token, pos)
+	}
+	prefillLogits := t2.Prefill(tokens, 0)
+
+	for i := range loopLogits {
+		if math.Abs(float64(loopLogits[i]-prefillLogits[i])) > 1e-4 {
+			t.Fatalf("logit[%d] = %f, want %f", i, prefillLogits[i], loopLogits[i])
+		}
+	}
+}
+
+func newTestTransformer(cfg Config) *Transformer {
+	kvDim := cfg.Dim * cfg.NKVHeads / cfg.NHeads
+	weights := Weights{
+		TokenEmbeddingTable: fillTestWeights(cfg.VocabSize * cfg.Dim),
+		Layers:              make([]LayerWeights, cfg.NLayers),
+		RMSFinalWeight:      fillTestWeights(cfg.Dim),
+	}
+	for i := range weights.Layers {
+		lw := &weights.Layers[i]
+		lw.RMSAttWeight = fillTestWeights(cfg.Dim)
+		lw.RMSFFNWeight = fillTestWeights(cfg.Dim)
+		lw.WQ = fillTestWeights(cfg.Dim * cfg.Dim)
+		lw.WK = fillTestWeights(cfg.Dim * kvDim)
+		lw.WV = fillTestWeights(cfg.Dim * kvDim)
+		lw.WO = fillTestWeights(cfg.Dim * cfg.Dim)
+		lw.W1 = fillTestWeights(cfg.Dim * cfg.HiddenDim)
+		lw.W2 = fillTestWeights(cfg.HiddenDim * cfg.Dim)
+		lw.W3 = fillTestWeights(cfg.Dim * cfg.HiddenDim)
+	}
+	weights.WCls = weights.TokenEmbeddingTable
+
+	headSize := cfg.Dim / cfg.NHeads
+	ropeCos, ropeSin := buildRopeTables(cfg.SeqLen, headSize, cfg.RopeTheta)
+	return &Transformer{
+		Config:  cfg,
+		Weights: weights,
+		State: State{
+			X:          make([]float32, cfg.Dim),
+			XB:         make([]float32, cfg.Dim),
+			XB2:        make([]float32, cfg.Dim),
+			HB:         make([]float32, cfg.HiddenDim),
+			HB2:        make([]float32, cfg.HiddenDim),
+			Q:          make([]float32, cfg.Dim),
+			K:          make([]float32, kvDim),
+			V:          make([]float32, kvDim),
+			Att:        make([]float32, cfg.NHeads*cfg.SeqLen),
+			Logits:     make([]float32, cfg.VocabSize),
+			KeyCache:   make([]float32, cfg.NLayers*cfg.SeqLen*kvDim),
+			ValueCache: make([]float32, cfg.NLayers*cfg.SeqLen*kvDim),
+		},
+		Tables: Tables{RopeCos: ropeCos, RopeSin: ropeSin},
+	}
+}
+
+func fillTestWeights(n int) []float32 {
+	values := make([]float32, n)
+	for i := range values {
+		values[i] = float32((i%17)-8) / 100
+	}
+	return values
+}
+
 var benchmarkLogits []float32
 
 func loadBenchmarkTransformer(b *testing.B) *Transformer {
@@ -153,10 +233,9 @@ func BenchmarkForwardPositionSweep(b *testing.B) {
 	}
 }
 
-// BenchmarkPrefill measures prompt ingestion from position 0. This matches the
-// model layer's current prefill behavior, where prompt tokens are processed one
-// at a time while filling the KV cache.
-func BenchmarkPrefill(b *testing.B) {
+// BenchmarkPrefillForwardLoop measures prompt ingestion by repeatedly calling
+// Forward. It is the pre-batched baseline.
+func BenchmarkPrefillForwardLoop(b *testing.B) {
 	for _, promptLen := range []int{128, 512} {
 		b.Run(strconv.Itoa(promptLen), func(b *testing.B) {
 			t := loadBenchmarkTransformer(b)
@@ -172,6 +251,29 @@ func BenchmarkPrefill(b *testing.B) {
 				for pos, token := range tokens {
 					benchmarkLogits = t.Forward(token, pos)
 				}
+			}
+			elapsed := time.Since(start)
+			b.StopTimer()
+			b.ReportMetric(float64(b.N*promptLen)/elapsed.Seconds(), "tok/s")
+		})
+	}
+}
+
+// BenchmarkPrefill measures batched prompt ingestion from position 0.
+func BenchmarkPrefill(b *testing.B) {
+	for _, promptLen := range []int{128, 512} {
+		b.Run(strconv.Itoa(promptLen), func(b *testing.B) {
+			t := loadBenchmarkTransformer(b)
+			if promptLen > t.Config.SeqLen {
+				b.Skipf("prompt length %d exceeds sequence length %d", promptLen, t.Config.SeqLen)
+			}
+			tokens := benchmarkTokens(t.Config.VocabSize, promptLen)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			start := time.Now()
+			for i := 0; i < b.N; i++ {
+				benchmarkLogits = t.Prefill(tokens, 0)
 			}
 			elapsed := time.Since(start)
 			b.StopTimer()
