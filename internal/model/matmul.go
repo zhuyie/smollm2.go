@@ -21,8 +21,9 @@ type matmulJob struct {
 }
 
 var (
-	matmulJobs      = make(chan matmulJob, matmulMaxWorkers)
-	matmulStartOnce sync.Once
+	matmulJobs          = make(chan matmulJob, matmulMaxWorkers)
+	matmulStartOnce     sync.Once
+	matmulWaitGroupPool = sync.Pool{New: func() any { return new(sync.WaitGroup) }}
 )
 
 func matmul(out []float32, x []float32, w []float32, n int, d int) {
@@ -38,7 +39,7 @@ func matmul(out []float32, x []float32, w []float32, n int, d int) {
 	w = w[:d*n]
 
 	rowsPerWorker := (d + workers - 1) / workers
-	var wg sync.WaitGroup
+	wg := matmulWaitGroupPool.Get().(*sync.WaitGroup)
 	for start := 0; start < d; start += rowsPerWorker {
 		end := start + rowsPerWorker
 		if end > d {
@@ -51,10 +52,11 @@ func matmul(out []float32, x []float32, w []float32, n int, d int) {
 			w:   w[start*n : end*n],
 			n:   n,
 			d:   end - start,
-			wg:  &wg,
+			wg:  wg,
 		}
 	}
 	wg.Wait()
+	matmulWaitGroupPool.Put(wg)
 }
 
 func startMatmulWorkers() {
