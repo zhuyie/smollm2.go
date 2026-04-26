@@ -20,8 +20,21 @@ type matmulJob struct {
 	wg  *sync.WaitGroup
 }
 
+type matmulBatchJob struct {
+	out   []float32
+	x     []float32
+	w     []float32
+	batch int
+	n     int
+	d     int
+	row0  int
+	row1  int
+	wg    *sync.WaitGroup
+}
+
 var (
 	matmulJobs          = make(chan matmulJob, matmulMaxWorkers)
+	matmulBatchJobs     = make(chan matmulBatchJob, matmulMaxWorkers)
 	matmulStartOnce     sync.Once
 	matmulWaitGroupPool = sync.Pool{New: func() any { return new(sync.WaitGroup) }}
 )
@@ -75,19 +88,28 @@ func matmulBatch(out []float32, x []float32, w []float32, batch int, n int, d in
 	w = w[:d*n]
 
 	rowsPerWorker := (d + workers - 1) / workers
-	var wg sync.WaitGroup
+	startMatmulWorkers()
+	wg := matmulWaitGroupPool.Get().(*sync.WaitGroup)
 	for start := 0; start < d; start += rowsPerWorker {
 		end := start + rowsPerWorker
 		if end > d {
 			end = d
 		}
 		wg.Add(1)
-		go func(row0 int, row1 int) {
-			defer wg.Done()
-			matmulBatchRows(out, x, w, batch, n, d, row0, row1)
-		}(start, end)
+		matmulBatchJobs <- matmulBatchJob{
+			out:   out,
+			x:     x,
+			w:     w,
+			batch: batch,
+			n:     n,
+			d:     d,
+			row0:  start,
+			row1:  end,
+			wg:    wg,
+		}
 	}
 	wg.Wait()
+	matmulWaitGroupPool.Put(wg)
 }
 
 func matmulBatchRows(out []float32, x []float32, w []float32, batch int, n int, d int, row0 int, row1 int) {
@@ -103,9 +125,15 @@ func startMatmulWorkers() {
 	matmulStartOnce.Do(func() {
 		for i := 0; i < matmulMaxWorkers; i++ {
 			go func() {
-				for job := range matmulJobs {
-					matmulF32(job.out, job.x, job.w, job.n, job.d)
-					job.wg.Done()
+				for {
+					select {
+					case job := <-matmulJobs:
+						matmulF32(job.out, job.x, job.w, job.n, job.d)
+						job.wg.Done()
+					case job := <-matmulBatchJobs:
+						matmulBatchRows(job.out, job.x, job.w, job.batch, job.n, job.d, job.row0, job.row1)
+						job.wg.Done()
+					}
 				}
 			}()
 		}

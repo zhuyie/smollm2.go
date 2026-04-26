@@ -268,6 +268,7 @@ func BenchmarkPrefill(b *testing.B) {
 				b.Skipf("prompt length %d exceeds sequence length %d", promptLen, t.Config.SeqLen)
 			}
 			tokens := benchmarkTokens(t.Config.VocabSize, promptLen)
+			benchmarkLogits = t.Prefill(tokens, 0)
 
 			b.ReportAllocs()
 			b.ResetTimer()
