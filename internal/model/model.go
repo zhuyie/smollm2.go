@@ -327,9 +327,7 @@ func (t *Transformer) Forward(token int, pos int) []float32 {
 			for ts := 0; ts <= pos; ts++ {
 				v := s.ValueCache[loff+ts*kvDim+headOff : loff+ts*kvDim+headOff+headSize]
 				a := att[ts]
-				for i := 0; i < headSize; i++ {
-					xb[i] += a * v[i]
-				}
+				addScaledF32(xb, v, a)
 			}
 		}
 
@@ -385,5 +383,14 @@ func softmax(x []float32) {
 	}
 	for i := range x {
 		x[i] /= sum
+	}
+}
+
+func addScaledF32(dst []float32, src []float32, scale float32) {
+	n := min(len(dst), len(src))
+	dst = dst[:n]
+	src = src[:n]
+	for i := range dst {
+		dst[i] += scale * src[i]
 	}
 }
