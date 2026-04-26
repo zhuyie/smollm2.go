@@ -385,12 +385,3 @@ func softmax(x []float32) {
 		x[i] /= sum
 	}
 }
-
-func addScaledF32(dst []float32, src []float32, scale float32) {
-	n := min(len(dst), len(src))
-	dst = dst[:n]
-	src = src[:n]
-	for i := range dst {
-		dst[i] += scale * src[i]
-	}
-}

@@ -28,3 +28,12 @@ func matmulScalar(out []float32, x []float32, w []float32, n int, d int) {
 		out[i] = dotF32Scalar(row, x)
 	}
 }
+
+func addScaledF32Scalar(dst []float32, src []float32, scale float32) {
+	n := min(len(dst), len(src))
+	dst = dst[:n]
+	src = src[:n]
+	for i := range dst {
+		dst[i] += scale * src[i]
+	}
+}

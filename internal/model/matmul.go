@@ -29,7 +29,7 @@ var (
 func matmul(out []float32, x []float32, w []float32, n int, d int) {
 	workers := min(runtime.GOMAXPROCS(0), matmulMaxWorkers, d/matmulRowsPerWorker)
 	if n*d < matmulMinParallelOps || workers < 2 {
-		matmulKernel(out, x, w, n, d)
+		matmulF32(out, x, w, n, d)
 		return
 	}
 	startMatmulWorkers()
@@ -64,7 +64,7 @@ func startMatmulWorkers() {
 		for i := 0; i < matmulMaxWorkers; i++ {
 			go func() {
 				for job := range matmulJobs {
-					matmulKernel(job.out, job.x, job.w, job.n, job.d)
+					matmulF32(job.out, job.x, job.w, job.n, job.d)
 					job.wg.Done()
 				}
 			}()

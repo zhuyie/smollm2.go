@@ -60,6 +60,19 @@ func TestSoftmax(t *testing.T) {
 	}
 }
 
+func TestAddScaledF32(t *testing.T) {
+	dst := []float32{1, 2, 3, 4, 5, 6, 7}
+	src := []float32{2, 3, 5, 7, 11, 13, 17}
+	addScaledF32(dst, src, 0.5)
+
+	want := []float32{2, 3.5, 5.5, 7.5, 10.5, 12.5, 15.5}
+	for i := range want {
+		if dst[i] != want[i] {
+			t.Fatalf("dst[%d] = %f, want %f", i, dst[i], want[i])
+		}
+	}
+}
+
 func TestBuildRopeTables(t *testing.T) {
 	seqLen := 4
 	headSize := 8
