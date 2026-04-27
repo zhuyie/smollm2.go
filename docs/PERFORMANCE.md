@@ -29,7 +29,7 @@ than perfectly stable.
 
 Code references:
 
-- [`internal/model/matmul_scalar.go`](../internal/model/matmul_scalar.go)
+- [`internal/model/kernel_scalar.go`](../internal/model/kernel_scalar.go)
 - [`internal/model/model.go`](../internal/model/model.go)
 
 Several hot loops are written in a style that helps the Go compiler eliminate
@@ -59,9 +59,8 @@ run constantly during both prefill and decode.
 
 Code references:
 
-- [`internal/model/matmul_arm64.go`](../internal/model/matmul_arm64.go)
 - [`internal/model/dot_arm64.s`](../internal/model/dot_arm64.s)
-- [`internal/model/dot_arm64.go`](../internal/model/dot_arm64.go)
+- [`internal/model/kernel_arm64.go`](../internal/model/kernel_arm64.go)
 
 The dominant math shape in this runtime is matrix-vector multiply:
 
@@ -73,7 +72,7 @@ On `arm64`, rows with a suitable width use a handwritten NEON/FMLA dot kernel
 instead of a scalar Go loop:
 
 - `dotF32ARM64` handles the actual SIMD dot product
-- `matmulKernel` applies it row-by-row for projection matrices
+- `matmulF32` applies it row-by-row for projection matrices
 - `dotF32` also reuses it for attention score computation
 
 This gives a meaningful speedup without changing the high-level model code.
@@ -121,13 +120,57 @@ every layer. That work is now moved to load time:
 
 This removes repeated transcendental math from a hot decode path.
 
-### 5. Faster attention score computation
+### 5. Batched prompt prefill
 
 Code references:
 
 - [`internal/model/model.go`](../internal/model/model.go)
-- [`internal/model/dot_arm64.go`](../internal/model/dot_arm64.go)
-- [`internal/model/dot_generic.go`](../internal/model/dot_generic.go)
+- [`internal/model/matmul.go`](../internal/model/matmul.go)
+- [`internal/model/dot_arm64.s`](../internal/model/dot_arm64.s)
+- [`cmd/smollm2/main.go`](../cmd/smollm2/main.go)
+
+Prompt ingestion now uses `Transformer.Prefill` instead of repeatedly calling
+`Forward` for every prompt token. The prefill path keeps all prompt-token
+hidden states in batch-shaped scratch buffers and applies the projection
+matrices with `matmulBatch`.
+
+The important shape is:
+
+```text
+out[batch x d] = x[batch x n] * W[d x n]^T
+```
+
+For ARM64, `matmulBatchRows` uses `dotF32Batch4ARM64` to compute four prompt
+rows against the same weight row while loading that weight row once. The kernel
+uses two accumulator groups to reduce dependent FMLA chains.
+
+Prefill also only computes final logits for the last prompt token. Intermediate
+prompt tokens still fill the KV cache and feed later layers, but they do not
+pay for the final vocabulary projection.
+
+Measured on Apple M2 Max with:
+
+```sh
+env GOCACHE=/tmp/smollm2-go-cache \
+  go test ./internal/model -run '^$' -bench 'BenchmarkPrefill(ForwardLoop)?$' -benchtime=3x -count=1
+```
+
+| Benchmark | Forward loop | Batched prefill | Improvement |
+| --- | ---: | ---: | ---: |
+| `Prefill/128` | `32.74 tok/s` | `124.3 tok/s` | `+279.7%` |
+| `Prefill/512` | `28.59 tok/s` | `84.38 tok/s` | `+195.1%` |
+
+This optimization improves time to first generated token for longer prompts. It
+does not improve steady-state decode throughput, because decode still processes
+one token at a time and therefore uses the regular single-token `Forward` path.
+
+### 6. Faster attention score computation
+
+Code references:
+
+- [`internal/model/model.go`](../internal/model/model.go)
+- [`internal/model/kernel_arm64.go`](../internal/model/kernel_arm64.go)
+- [`internal/model/kernel_generic.go`](../internal/model/kernel_generic.go)
 
 The attention score loop used to do a scalar `q·k` dot product directly inside
 the nested head/time loop. It now:
@@ -144,12 +187,14 @@ while cutting repeated work.
 
 Using the benchmark command above on the M2 Max, the model runtime moved from
 the original benchmark baseline at commit `18a36ef` (before this batch of
-inference optimizations) to the current optimized runtime on `main`:
+inference optimizations) to the current optimized runtime on `main`. Prefill
+numbers include the batched prefill path; decode numbers are from the earlier
+single-token optimization pass and are shown for context.
 
 | Benchmark | Original Baseline | Current | Improvement |
 | --- | ---: | ---: | ---: |
-| `Prefill/128` | `7.818 tok/s` | `32.33 tok/s` | `+313.5%` |
-| `Prefill/512` | `7.233 tok/s` | `27.56 tok/s` | `+281.0%` |
+| `Prefill/128` | `7.818 tok/s` | `124.3 tok/s` | `+1489.9%` |
+| `Prefill/512` | `7.233 tok/s` | `84.38 tok/s` | `+1066.7%` |
 | `Decode/128` | `7.503 tok/s` | `30.58 tok/s` | `+307.6%` |
 | `Decode/512` | `6.685 tok/s` | `22.92 tok/s` | `+242.9%` |
 
