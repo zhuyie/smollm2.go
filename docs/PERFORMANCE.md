@@ -148,12 +148,7 @@ Prefill also only computes final logits for the last prompt token. Intermediate
 prompt tokens still fill the KV cache and feed later layers, but they do not
 pay for the final vocabulary projection.
 
-Measured on Apple M2 Max with:
-
-```sh
-env GOCACHE=/tmp/smollm2-go-cache \
-  go test ./internal/model -run '^$' -bench 'BenchmarkPrefill(ForwardLoop)?$' -benchtime=3x -count=1
-```
+Measured on Apple M2 Max during the batched-prefill optimization pass:
 
 | Benchmark | Forward loop | Batched prefill | Improvement |
 | --- | ---: | ---: | ---: |

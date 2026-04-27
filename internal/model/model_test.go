@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
-	"time"
 )
 
 func TestValidateConfig(t *testing.T) {
@@ -251,45 +250,6 @@ func benchmarkTokens(vocabSize int, count int) []int {
 	return tokens
 }
 
-// BenchmarkForwardPositionSweep measures one-token Forward calls while cycling
-// through all cache positions. It is useful as a broad Forward regression test,
-// but it is not shaped like a real prefill or decode workload.
-func BenchmarkForwardPositionSweep(b *testing.B) {
-	t := loadBenchmarkTransformer(b)
-	token := 0
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		benchmarkLogits = t.Forward(token, i%t.Config.SeqLen)
-	}
-}
-
-// BenchmarkPrefillForwardLoop measures prompt ingestion by repeatedly calling
-// Forward. It is the pre-batched baseline.
-func BenchmarkPrefillForwardLoop(b *testing.B) {
-	for _, promptLen := range []int{128, 512} {
-		b.Run(strconv.Itoa(promptLen), func(b *testing.B) {
-			t := loadBenchmarkTransformer(b)
-			if promptLen > t.Config.SeqLen {
-				b.Skipf("prompt length %d exceeds sequence length %d", promptLen, t.Config.SeqLen)
-			}
-			tokens := benchmarkTokens(t.Config.VocabSize, promptLen)
-
-			b.ReportAllocs()
-			b.ResetTimer()
-			start := time.Now()
-			for i := 0; i < b.N; i++ {
-				for pos, token := range tokens {
-					benchmarkLogits = t.Forward(token, pos)
-				}
-			}
-			elapsed := time.Since(start)
-			b.StopTimer()
-			b.ReportMetric(float64(b.N*promptLen)/elapsed.Seconds(), "tok/s")
-		})
-	}
-}
-
 // BenchmarkPrefill measures batched prompt ingestion from position 0.
 func BenchmarkPrefill(b *testing.B) {
 	for _, promptLen := range []int{128, 512} {
@@ -303,13 +263,10 @@ func BenchmarkPrefill(b *testing.B) {
 
 			b.ReportAllocs()
 			b.ResetTimer()
-			start := time.Now()
 			for i := 0; i < b.N; i++ {
 				benchmarkLogits = t.Prefill(tokens, 0)
 			}
-			elapsed := time.Since(start)
-			b.StopTimer()
-			b.ReportMetric(float64(b.N*promptLen)/elapsed.Seconds(), "tok/s")
+			b.ReportMetric(float64(b.N*promptLen)*1e9/float64(b.Elapsed().Nanoseconds()), "tok/s")
 		})
 	}
 }
@@ -332,13 +289,10 @@ func BenchmarkDecode(b *testing.B) {
 
 			b.ReportAllocs()
 			b.ResetTimer()
-			start := time.Now()
 			for i := 0; i < b.N; i++ {
 				benchmarkLogits = t.Forward(decodeToken, contextLen)
 			}
-			elapsed := time.Since(start)
-			b.StopTimer()
-			b.ReportMetric(float64(b.N)/elapsed.Seconds(), "tok/s")
+			b.ReportMetric(float64(b.N)*1e9/float64(b.Elapsed().Nanoseconds()), "tok/s")
 		})
 	}
 }
