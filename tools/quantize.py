@@ -1,0 +1,135 @@
+"""Convert an SML2 fp32 checkpoint to SML2 int8 weight format."""
+
+import argparse
+import struct
+
+import numpy as np
+
+
+CHECKPOINT_MAGIC = 0x324C4D53
+CHECKPOINT_VERSION_F32 = 1
+CHECKPOINT_VERSION_TYPED = 2
+CHECKPOINT_HEADER_SIZE = 256
+WEIGHTS_INT8 = 1
+
+
+def read_fp32(file, count):
+    data = np.fromfile(file, dtype="<f4", count=count)
+    if data.size != count:
+        raise EOFError(f"expected {count} float32 values, got {data.size}")
+    return data
+
+
+def write_fp32(file, data):
+    file.write(np.asarray(data, dtype="<f4").reshape(-1).tobytes())
+
+
+def write_int8_matrix(file, data, inputs, rows):
+    matrix = np.asarray(data, dtype=np.float32).reshape(rows, inputs)
+    max_abs = np.max(np.abs(matrix), axis=1)
+    scale = np.where(max_abs > 0, max_abs / 127.0, 1.0).astype("<f4")
+    quantized = np.rint(matrix / scale[:, None])
+    quantized = np.clip(quantized, -127, 127).astype(np.int8)
+    file.write(quantized.reshape(-1).tobytes())
+    file.write(scale.tobytes())
+
+
+def read_header(file):
+    header = file.read(CHECKPOINT_HEADER_SIZE)
+    if len(header) != CHECKPOINT_HEADER_SIZE:
+        raise EOFError("checkpoint header is truncated")
+    magic, version, dim, hidden_dim, n_layers, n_heads, n_kv_heads, vocab_size, seq_len, shared, rope_theta = struct.unpack_from(
+        "<Iiiiiiiiiif", header
+    )
+    if magic != CHECKPOINT_MAGIC or version != CHECKPOINT_VERSION_F32:
+        raise ValueError(f"expected SML2 fp32 v1 checkpoint, got magic={magic:#x} version={version}")
+    return {
+        "dim": dim,
+        "hidden_dim": hidden_dim,
+        "n_layers": n_layers,
+        "n_heads": n_heads,
+        "n_kv_heads": n_kv_heads,
+        "vocab_size": vocab_size,
+        "seq_len": seq_len,
+        "shared": shared,
+        "rope_theta": rope_theta,
+    }
+
+
+def write_header(file, cfg):
+    header = struct.pack(
+        "<Iiiiiiiiiifi",
+        CHECKPOINT_MAGIC,
+        CHECKPOINT_VERSION_TYPED,
+        cfg["dim"],
+        cfg["hidden_dim"],
+        cfg["n_layers"],
+        cfg["n_heads"],
+        cfg["n_kv_heads"],
+        cfg["vocab_size"],
+        cfg["seq_len"],
+        cfg["shared"],
+        cfg["rope_theta"],
+        WEIGHTS_INT8,
+    )
+    file.write(header)
+    file.write(b"\0" * (CHECKPOINT_HEADER_SIZE - len(header)))
+
+
+def convert(input_path, output_path):
+    with open(input_path, "rb") as src, open(output_path, "wb") as dst:
+        cfg = read_header(src)
+        write_header(dst, cfg)
+
+        dim = cfg["dim"]
+        hidden_dim = cfg["hidden_dim"]
+        n_layers = cfg["n_layers"]
+        n_heads = cfg["n_heads"]
+        n_kv_heads = cfg["n_kv_heads"]
+        vocab_size = cfg["vocab_size"]
+        kv_dim = dim * n_kv_heads // n_heads
+
+        token_embedding = read_fp32(src, vocab_size * dim)
+        write_fp32(dst, token_embedding)
+
+        for _ in range(n_layers):
+            write_fp32(dst, read_fp32(src, dim))
+            write_int8_matrix(dst, read_fp32(src, dim * dim), dim, dim)
+            write_int8_matrix(dst, read_fp32(src, dim * kv_dim), dim, kv_dim)
+            write_int8_matrix(dst, read_fp32(src, dim * kv_dim), dim, kv_dim)
+            write_int8_matrix(dst, read_fp32(src, dim * dim), dim, dim)
+            write_fp32(dst, read_fp32(src, dim))
+            write_int8_matrix(dst, read_fp32(src, dim * hidden_dim), dim, hidden_dim)
+            write_int8_matrix(dst, read_fp32(src, hidden_dim * dim), hidden_dim, dim)
+            write_int8_matrix(dst, read_fp32(src, dim * hidden_dim), dim, hidden_dim)
+
+        write_fp32(dst, read_fp32(src, dim))
+        if cfg["shared"]:
+            write_int8_matrix(dst, token_embedding, dim, vocab_size)
+        else:
+            write_int8_matrix(dst, read_fp32(src, vocab_size * dim), dim, vocab_size)
+
+        trailing = src.read(1)
+        if trailing:
+            raise ValueError("input checkpoint has trailing bytes")
+
+    print(f"wrote {output_path}")
+    print(
+        "config: "
+        f"dim={cfg['dim']} hidden_dim={cfg['hidden_dim']} layers={cfg['n_layers']} "
+        f"heads={cfg['n_heads']} kv_heads={cfg['n_kv_heads']} vocab={cfg['vocab_size']} "
+        f"seq_len={cfg['seq_len']} rope_theta={cfg['rope_theta']} shared_classifier={cfg['shared']} "
+        "weight_type=int8"
+    )
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("input", help="input SML2 fp32 checkpoint path")
+    parser.add_argument("output", help="output SML2 int8 checkpoint path")
+    args = parser.parse_args()
+    convert(args.input, args.output)
+
+
+if __name__ == "__main__":
+    main()

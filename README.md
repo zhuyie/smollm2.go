@@ -24,7 +24,8 @@ docs/PERFORMANCE.md   inference optimization notes
 
 ## Prepare Python Environment
 
-The export scripts need `torch`, `transformers`, and `sentencepiece`.
+The export and conversion scripts need `torch`, `transformers`, `sentencepiece`,
+and `numpy`.
 
 One option is to create a local venv:
 
@@ -61,6 +62,14 @@ For a smarter model, export the 1.7B checkpoint:
 ```
 
 The tokenizer is shared by the SmolLM2 Instruct family, so it only needs to be exported once.
+
+Optionally convert a float32 checkpoint to int8 weights:
+
+```sh
+.venv/bin/python tools/quantize.py \
+  models/smollm2-360m-instruct-f32.bin \
+  models/smollm2-360m-instruct-int8.bin
+```
 
 ## Build
 

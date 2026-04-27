@@ -1,6 +1,10 @@
 # Binary Formats
 
-This project uses a simple float32 checkpoint format.
+This project uses a simple SML2 checkpoint format. Version 1 checkpoints are
+float32-only. Version 2 checkpoints add an explicit `weight_type` field so the
+runtime can select the inference path from the file itself.
+
+All numeric fields are little-endian.
 
 ## Header
 
@@ -9,7 +13,7 @@ The first 256 bytes are reserved for the header.
 | Field | Type | Notes |
 | --- | --- | --- |
 | `magic` | `uint32` | `0x324C4D53`, bytes spell `SML2` |
-| `version` | `int32` | currently `1` |
+| `version` | `int32` | `1` or `2` |
 | `dim` | `int32` | model hidden size |
 | `hidden_dim` | `int32` | MLP hidden size |
 | `n_layers` | `int32` | Transformer block count |
@@ -19,12 +23,17 @@ The first 256 bytes are reserved for the header.
 | `seq_len` | `int32` | maximum sequence length |
 | `shared_classifier` | `int32` | nonzero means `wcls` aliases token embeddings |
 | `rope_theta` | `float32` | RoPE base frequency |
+| `weight_type` | `int32` | version 2 only: `0` = float32, `1` = int8 |
 
 All remaining bytes up to byte 256 are zero padding.
 
-## Tensor Order
+Version 1 has no `weight_type` field; it is equivalent to version 2 with
+`weight_type == 0`.
 
-All tensors are written as contiguous float32 values in row-major order.
+## Float32 Weights
+
+For `weight_type == 0`, all tensors are written as contiguous float32 values in
+row-major order.
 
 1. `token_embedding_table`: `(vocab_size, dim)`
 2. For each layer:
@@ -41,6 +50,37 @@ All tensors are written as contiguous float32 values in row-major order.
 4. If `shared_classifier == 0`, `wcls`: `(vocab_size, dim)`
 
 `head_size = dim / n_heads`.
+
+## Int8 Weights
+
+For `weight_type == 1`, embeddings and RMSNorm weights stay float32. Projection
+matrices are stored as per-row symmetric int8.
+
+Each int8 matrix is written as:
+
+1. `int8 data`: `(rows, inputs)` in row-major order
+2. `float32 scale`: `(rows,)`
+
+The dequantized value is `float32(data[row, col]) * scale[row]`.
+
+The tensor order is:
+
+1. `token_embedding_table`: `(vocab_size, dim)` as float32
+2. For each layer:
+   - `rms_att_weight`: `(dim,)` as float32
+   - `wq`: int8 matrix `(dim, dim)`
+   - `wk`: int8 matrix `(n_kv_heads * head_size, dim)`
+   - `wv`: int8 matrix `(n_kv_heads * head_size, dim)`
+   - `wo`: int8 matrix `(dim, dim)`
+   - `rms_ffn_weight`: `(dim,)` as float32
+   - `w1`: int8 matrix `(hidden_dim, dim)`
+   - `w2`: int8 matrix `(dim, hidden_dim)`
+   - `w3`: int8 matrix `(hidden_dim, dim)`
+3. `rms_final_weight`: `(dim,)` as float32
+4. `wcls`: int8 matrix `(vocab_size, dim)`
+
+Int8 checkpoints always include a quantized `wcls`, even when the float32 source
+checkpoint used shared classifier weights.
 
 ## Tokenizer Format
 

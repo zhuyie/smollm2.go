@@ -42,7 +42,6 @@ const (
 func main() {
 	modelPath := flag.String("model", "", "SML2 model path")
 	tokenizerPath := flag.String("tokenizer", "", "TOK2 tokenizer path")
-	quant := flag.Bool("quant", false, "enable int8 weight quantization")
 	mode := flag.String("mode", "generate", "generate|chat|toolcall|encode|logits")
 	prompt := flag.String("prompt", "", "input prompt")
 	systemPrompt := flag.String("system", "", "optional system prompt for chat")
@@ -60,9 +59,6 @@ func main() {
 	transformer, err := model.Load(*modelPath)
 	if err != nil {
 		log.Fatal(err)
-	}
-	if *quant {
-		transformer.QuantizeInt8()
 	}
 	tok, err := tokenizer.Load(*tokenizerPath, transformer.Config.VocabSize)
 	if err != nil {

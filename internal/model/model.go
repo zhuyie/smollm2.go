@@ -10,8 +10,14 @@ import (
 
 const (
 	checkpointMagic      uint32 = 0x324c4d53 // SML2
-	checkpointVersion           = int32(1)
+	checkpointVersionV1         = int32(1)
+	checkpointVersionV2         = int32(2)
 	checkpointHeaderSize        = int64(256)
+)
+
+const (
+	checkpointWeightsFP32 int32 = 0
+	checkpointWeightsInt8 int32 = 1
 )
 
 type Config struct {
@@ -116,7 +122,7 @@ func Load(path string) (*Transformer, error) {
 	if err := binary.Read(file, binary.LittleEndian, &version); err != nil {
 		return nil, err
 	}
-	if magic != checkpointMagic || version != checkpointVersion {
+	if magic != checkpointMagic || (version != checkpointVersionV1 && version != checkpointVersionV2) {
 		return nil, fmt.Errorf("bad checkpoint header: magic=%#x version=%d", magic, version)
 	}
 
@@ -129,6 +135,15 @@ func Load(path string) (*Transformer, error) {
 	var ropeTheta float32
 	if err := binary.Read(file, binary.LittleEndian, &ropeTheta); err != nil {
 		return nil, err
+	}
+	weightType := checkpointWeightsFP32
+	if version == checkpointVersionV2 {
+		if err := binary.Read(file, binary.LittleEndian, &weightType); err != nil {
+			return nil, err
+		}
+	}
+	if weightType != checkpointWeightsFP32 && weightType != checkpointWeightsInt8 {
+		return nil, fmt.Errorf("unsupported checkpoint weight type: %d", weightType)
 	}
 
 	cfg := Config{
@@ -151,28 +166,45 @@ func Load(path string) (*Transformer, error) {
 
 	kvDim := cfg.Dim * cfg.NKVHeads / cfg.NHeads
 
-	// Weight order must match tools/export.py exactly. Matrices are stored row-major:
-	// each output channel owns one contiguous row consumed by matmul.
+	// Weight order must match the export tools exactly. Matrices are stored
+	// row-major: each output channel owns one contiguous row consumed by matmul.
 	weights := Weights{SharedWeights: sharedWeights}
 	weights.TokenEmbeddingTable = readFloat32s(file, cfg.VocabSize*cfg.Dim)
 	weights.Layers = make([]LayerWeights, cfg.NLayers)
-	for i := range weights.Layers {
-		lw := &weights.Layers[i]
-		lw.RMSAttWeight = readFloat32s(file, cfg.Dim)
-		lw.WQ = readFloat32s(file, cfg.Dim*cfg.Dim)
-		lw.WK = readFloat32s(file, cfg.Dim*kvDim)
-		lw.WV = readFloat32s(file, cfg.Dim*kvDim)
-		lw.WO = readFloat32s(file, cfg.Dim*cfg.Dim)
-		lw.RMSFFNWeight = readFloat32s(file, cfg.Dim)
-		lw.W1 = readFloat32s(file, cfg.Dim*cfg.HiddenDim)
-		lw.W2 = readFloat32s(file, cfg.HiddenDim*cfg.Dim)
-		lw.W3 = readFloat32s(file, cfg.Dim*cfg.HiddenDim)
-	}
-	weights.RMSFinalWeight = readFloat32s(file, cfg.Dim)
-	if sharedWeights {
-		weights.WCls = weights.TokenEmbeddingTable
-	} else {
-		weights.WCls = readFloat32s(file, cfg.VocabSize*cfg.Dim)
+	if weightType == checkpointWeightsFP32 {
+		for i := range weights.Layers {
+			lw := &weights.Layers[i]
+			lw.RMSAttWeight = readFloat32s(file, cfg.Dim)
+			lw.WQ = readFloat32s(file, cfg.Dim*cfg.Dim)
+			lw.WK = readFloat32s(file, cfg.Dim*kvDim)
+			lw.WV = readFloat32s(file, cfg.Dim*kvDim)
+			lw.WO = readFloat32s(file, cfg.Dim*cfg.Dim)
+			lw.RMSFFNWeight = readFloat32s(file, cfg.Dim)
+			lw.W1 = readFloat32s(file, cfg.Dim*cfg.HiddenDim)
+			lw.W2 = readFloat32s(file, cfg.HiddenDim*cfg.Dim)
+			lw.W3 = readFloat32s(file, cfg.Dim*cfg.HiddenDim)
+		}
+		weights.RMSFinalWeight = readFloat32s(file, cfg.Dim)
+		if sharedWeights {
+			weights.WCls = weights.TokenEmbeddingTable
+		} else {
+			weights.WCls = readFloat32s(file, cfg.VocabSize*cfg.Dim)
+		}
+	} else if weightType == checkpointWeightsInt8 {
+		for i := range weights.Layers {
+			lw := &weights.Layers[i]
+			lw.RMSAttWeight = readFloat32s(file, cfg.Dim)
+			lw.QWQ = readQuantizedMatrixInt8(file, cfg.Dim, cfg.Dim)
+			lw.QWK = readQuantizedMatrixInt8(file, cfg.Dim, kvDim)
+			lw.QWV = readQuantizedMatrixInt8(file, cfg.Dim, kvDim)
+			lw.QWO = readQuantizedMatrixInt8(file, cfg.Dim, cfg.Dim)
+			lw.RMSFFNWeight = readFloat32s(file, cfg.Dim)
+			lw.QW1 = readQuantizedMatrixInt8(file, cfg.Dim, cfg.HiddenDim)
+			lw.QW2 = readQuantizedMatrixInt8(file, cfg.HiddenDim, cfg.Dim)
+			lw.QW3 = readQuantizedMatrixInt8(file, cfg.Dim, cfg.HiddenDim)
+		}
+		weights.RMSFinalWeight = readFloat32s(file, cfg.Dim)
+		weights.QWCls = readQuantizedMatrixInt8(file, cfg.Dim, cfg.VocabSize)
 	}
 
 	state := State{
@@ -219,6 +251,24 @@ func validateConfig(cfg Config) error {
 
 func readFloat32s(r io.Reader, count int) []float32 {
 	data := make([]float32, count)
+	if err := binary.Read(r, binary.LittleEndian, data); err != nil {
+		panic(err)
+	}
+	return data
+}
+
+func readQuantizedMatrixInt8(r io.Reader, n int, d int) *QuantizedMatrix {
+	q := &QuantizedMatrix{
+		Data:   readInt8s(r, n*d),
+		Scale:  readFloat32s(r, d),
+		Inputs: n,
+		Rows:   d,
+	}
+	return q
+}
+
+func readInt8s(r io.Reader, count int) []int8 {
+	data := make([]int8, count)
 	if err := binary.Read(r, binary.LittleEndian, data); err != nil {
 		panic(err)
 	}
