@@ -147,6 +147,72 @@ func TestMatmul(t *testing.T) {
 	}
 }
 
+func TestQuantizedMatmulApproximatesFloat(t *testing.T) {
+	n := 9
+	d := 4
+	x := fillTestWeights(n)
+	w := fillTestWeights(n * d)
+	q := quantizeMatrixInt8(w, n, d)
+	got := make([]float32, d)
+	want := make([]float32, d)
+	matmulInt8(got, x, q, n, d)
+	matmul(want, x, w, n, d)
+	for i := range want {
+		if math.Abs(float64(got[i]-want[i])) > 0.02 {
+			t.Fatalf("out[%d] = %f, want near %f", i, got[i], want[i])
+		}
+	}
+}
+
+func TestQuantizeInt8ForwardApproximatesFloat(t *testing.T) {
+	cfg := Config{
+		Dim:       8,
+		HiddenDim: 16,
+		NLayers:   2,
+		NHeads:    2,
+		NKVHeads:  1,
+		VocabSize: 17,
+		SeqLen:    16,
+		RopeTheta: 10000,
+	}
+	floatModel := newTestTransformer(cfg)
+	quantModel := newTestTransformer(cfg)
+	quantModel.QuantizeInt8()
+
+	floatLogits := floatModel.Forward(3, 0)
+	quantLogits := quantModel.Forward(3, 0)
+	for i := range floatLogits {
+		if math.Abs(float64(quantLogits[i]-floatLogits[i])) > 0.05 {
+			t.Fatalf("logit[%d] = %f, want near %f", i, quantLogits[i], floatLogits[i])
+		}
+	}
+}
+
+func TestQuantizeInt8PrefillApproximatesFloat(t *testing.T) {
+	cfg := Config{
+		Dim:       8,
+		HiddenDim: 16,
+		NLayers:   2,
+		NHeads:    2,
+		NKVHeads:  1,
+		VocabSize: 17,
+		SeqLen:    16,
+		RopeTheta: 10000,
+	}
+	floatModel := newTestTransformer(cfg)
+	quantModel := newTestTransformer(cfg)
+	quantModel.QuantizeInt8()
+
+	tokens := []int{1, 5, 9, 3, 7}
+	floatLogits := floatModel.Prefill(tokens, 0)
+	quantLogits := quantModel.Prefill(tokens, 0)
+	for i := range floatLogits {
+		if math.Abs(float64(quantLogits[i]-floatLogits[i])) > 0.05 {
+			t.Fatalf("logit[%d] = %f, want near %f", i, quantLogits[i], floatLogits[i])
+		}
+	}
+}
+
 func TestPrefillMatchesForwardLoop(t *testing.T) {
 	cfg := Config{
 		Dim:       8,
