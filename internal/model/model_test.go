@@ -109,6 +109,22 @@ func TestDotF32Batch4(t *testing.T) {
 	}
 }
 
+func TestDotF32Int8(t *testing.T) {
+	for _, n := range []int{7, 16, 64, 80} {
+		x := make([]float32, n)
+		w := make([]int8, n)
+		for i := range w {
+			x[i] = float32((i%13)-6) / 13
+			w[i] = int8((i % 17) - 8)
+		}
+		got := dotF32Int8(x, w)
+		want := dotF32Int8Scalar(x, w)
+		if math.Abs(float64(got-want)) > 1e-4 {
+			t.Fatalf("n=%d got %f, want %f", n, got, want)
+		}
+	}
+}
+
 func TestBuildRopeTables(t *testing.T) {
 	seqLen := 4
 	headSize := 8
@@ -359,23 +375,29 @@ func BenchmarkPrefill(b *testing.B) {
 // outside the timed region.
 func BenchmarkDecode(b *testing.B) {
 	for _, contextLen := range []int{128, 512} {
-		b.Run(strconv.Itoa(contextLen), func(b *testing.B) {
-			t := loadBenchmarkTransformer(b)
-			if contextLen >= t.Config.SeqLen {
-				b.Skipf("context length %d leaves no decode position in sequence length %d", contextLen, t.Config.SeqLen)
-			}
-			tokens := benchmarkTokens(t.Config.VocabSize, contextLen+1)
-			for pos := 0; pos < contextLen; pos++ {
-				benchmarkLogits = t.Forward(tokens[pos], pos)
-			}
-			decodeToken := tokens[contextLen]
+		for _, mode := range []struct {
+			name     string
+			quantize bool
+		}{
+			{name: "f32"},
+			{name: "int8", quantize: true},
+		} {
+			b.Run(strconv.Itoa(contextLen)+"/"+mode.name, func(b *testing.B) {
+				t := loadBenchmarkTransformerMode(b, mode.quantize)
+				if contextLen >= t.Config.SeqLen {
+					b.Skipf("context length %d leaves no decode position in sequence length %d", contextLen, t.Config.SeqLen)
+				}
+				tokens := benchmarkTokens(t.Config.VocabSize, contextLen+1)
+				benchmarkLogits = t.Prefill(tokens[:contextLen], 0)
+				decodeToken := tokens[contextLen]
 
-			b.ReportAllocs()
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				benchmarkLogits = t.Forward(decodeToken, contextLen)
-			}
-			b.ReportMetric(float64(b.N)*1e9/float64(b.Elapsed().Nanoseconds()), "tok/s")
-		})
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					benchmarkLogits = t.Forward(decodeToken, contextLen)
+				}
+				b.ReportMetric(float64(b.N)*1e9/float64(b.Elapsed().Nanoseconds()), "tok/s")
+			})
+		}
 	}
 }

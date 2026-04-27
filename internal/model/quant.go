@@ -138,19 +138,7 @@ func matmulInt8Rows(out []float32, x []float32, q *QuantizedMatrix, n int, row0 
 	data := q.Data[:row1*n]
 	for row := row0; row < row1; row++ {
 		weights := data[row*n : (row+1)*n]
-		var v0, v1, v2, v3 float32
-		i := 0
-		for ; i+3 < n; i += 4 {
-			v0 += x[i] * float32(weights[i])
-			v1 += x[i+1] * float32(weights[i+1])
-			v2 += x[i+2] * float32(weights[i+2])
-			v3 += x[i+3] * float32(weights[i+3])
-		}
-		val := v0 + v1 + v2 + v3
-		for ; i < n; i++ {
-			val += x[i] * float32(weights[i])
-		}
-		out[row] = val * q.Scale[row]
+		out[row] = dotF32Int8(x, weights) * q.Scale[row]
 	}
 }
 
@@ -226,23 +214,6 @@ func matmulBatchInt8Rows(out []float32, x []float32, q *QuantizedMatrix, work []
 			out[b*d+row] = dotF32(x[b*n:(b+1)*n], work)
 		}
 	}
-}
-
-func dotInt8(x []float32, weights []int8) float32 {
-	var v0, v1, v2, v3 float32
-	i := 0
-	n := len(x)
-	for ; i+3 < n; i += 4 {
-		v0 += x[i] * float32(weights[i])
-		v1 += x[i+1] * float32(weights[i+1])
-		v2 += x[i+2] * float32(weights[i+2])
-		v3 += x[i+3] * float32(weights[i+3])
-	}
-	val := v0 + v1 + v2 + v3
-	for ; i < n; i++ {
-		val += x[i] * float32(weights[i])
-	}
-	return val
 }
 
 func getMatmulInt8Work(size int) []float32 {
