@@ -308,6 +308,15 @@ func loadBenchmarkTransformer(b *testing.B) *Transformer {
 	return t
 }
 
+func loadBenchmarkTransformerMode(b *testing.B, quantize bool) *Transformer {
+	b.Helper()
+	t := loadBenchmarkTransformer(b)
+	if quantize {
+		t.QuantizeInt8()
+	}
+	return t
+}
+
 func benchmarkTokens(vocabSize int, count int) []int {
 	tokens := make([]int, count)
 	for i := range tokens {
@@ -319,21 +328,29 @@ func benchmarkTokens(vocabSize int, count int) []int {
 // BenchmarkPrefill measures batched prompt ingestion from position 0.
 func BenchmarkPrefill(b *testing.B) {
 	for _, promptLen := range []int{128, 512} {
-		b.Run(strconv.Itoa(promptLen), func(b *testing.B) {
-			t := loadBenchmarkTransformer(b)
-			if promptLen > t.Config.SeqLen {
-				b.Skipf("prompt length %d exceeds sequence length %d", promptLen, t.Config.SeqLen)
-			}
-			tokens := benchmarkTokens(t.Config.VocabSize, promptLen)
-			benchmarkLogits = t.Prefill(tokens, 0)
-
-			b.ReportAllocs()
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
+		for _, mode := range []struct {
+			name     string
+			quantize bool
+		}{
+			{name: "f32"},
+			{name: "int8", quantize: true},
+		} {
+			b.Run(strconv.Itoa(promptLen)+"/"+mode.name, func(b *testing.B) {
+				t := loadBenchmarkTransformerMode(b, mode.quantize)
+				if promptLen > t.Config.SeqLen {
+					b.Skipf("prompt length %d exceeds sequence length %d", promptLen, t.Config.SeqLen)
+				}
+				tokens := benchmarkTokens(t.Config.VocabSize, promptLen)
 				benchmarkLogits = t.Prefill(tokens, 0)
-			}
-			b.ReportMetric(float64(b.N*promptLen)*1e9/float64(b.Elapsed().Nanoseconds()), "tok/s")
-		})
+
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					benchmarkLogits = t.Prefill(tokens, 0)
+				}
+				b.ReportMetric(float64(b.N*promptLen)*1e9/float64(b.Elapsed().Nanoseconds()), "tok/s")
+			})
+		}
 	}
 }
 
