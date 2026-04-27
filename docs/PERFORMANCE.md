@@ -15,6 +15,12 @@ env GOCACHE=/tmp/smollm2-go-cache \
   go test ./internal/model -bench 'Benchmark(Decode|Prefill)' -benchtime=1x -run '^$'
 ```
 
+The model benchmarks include both `f32` and `int8` subcases. The int8 benchmark
+case converts the loaded float32 test checkpoint in memory so the kernel paths
+can be compared in one command. In normal CLI usage, int8 inference is selected
+by loading a version 2 checkpoint with `weight_type == 1`; there is no runtime
+quantization flag.
+
 Machine used for the measurements in this document:
 
 - Apple M2 Max
@@ -182,8 +188,8 @@ while cutting repeated work.
 
 Using the benchmark command above on the M2 Max, the model runtime moved from
 the original benchmark baseline at commit `18a36ef` (before this batch of
-inference optimizations) to the current optimized runtime on `main`. Prefill
-numbers include the batched prefill path; decode numbers are from the earlier
+inference optimizations) to the optimized float32 runtime. Prefill numbers
+include the batched prefill path; decode numbers are from the earlier
 single-token optimization pass and are shown for context.
 
 | Benchmark | Original Baseline | Current | Improvement |
@@ -197,6 +203,62 @@ The exact percentages will vary run to run, but the gains are real enough to
 show up consistently in both prefill and decode, especially at longer context
 lengths.
 
+## Weight-only int8 checkpoints and kernels
+
+Code references:
+
+- [`internal/model/quant.go`](../internal/model/quant.go)
+- [`internal/model/model.go`](../internal/model/model.go)
+- [`internal/model/kernel_arm64.go`](../internal/model/kernel_arm64.go)
+- [`internal/model/dot_arm64.s`](../internal/model/dot_arm64.s)
+- [`tools/quantize.py`](../tools/quantize.py)
+
+The quantized path is intentionally narrow: projection matrices are stored as
+per-row symmetric int8, while token embeddings, activations, KV cache, and
+normalization weights remain float32. This keeps the model code close to the
+float32 path while reducing memory bandwidth for the large matrix-vector
+projection work.
+
+SML2 version 2 checkpoints carry an explicit `weight_type` field:
+
+- `0`: float32 weights
+- `1`: int8 projection weights
+
+The loader reads that field and fills either the float32 matrix fields or their
+quantized counterparts. Runtime matmul dispatch then uses `matmulWeight` /
+`matmulBatchWeight`, so higher-level `Forward` and `Prefill` code does not need
+separate branches for every projection.
+
+The decode path multiplies float32 activations by int8 weights and applies the
+per-row scale after the dot product:
+
+```text
+out[row] = dot_f32_int8(x, qweight[row]) * scale[row]
+```
+
+On ARM64, `dotF32Int8ARM64` loads the float32 activation vector and signed int8
+weights, widens the int8 lanes, converts them to float32, and accumulates with
+NEON FMLA. The generic path keeps the same behavior in scalar Go.
+
+The prefill path reuses the same quantized storage but dequantizes one weight
+row into reusable scratch space before applying the existing batch-4 float32 dot
+kernel. This measured better than keeping a dynamic int8 activation path in this
+codebase, and avoids repeated steady-state allocation by pooling the scratch
+buffer.
+
+Measured on Apple M2 Max with the benchmark command above:
+
+| Benchmark | Float32 | Int8 | Improvement |
+| --- | ---: | ---: | ---: |
+| `Decode/128` | `31.2 tok/s` | `56.7 tok/s` | `+81.7%` |
+| `Decode/512` | `24.6 tok/s` | `36.4 tok/s` | `+48.0%` |
+| `Prefill/128` | `114.5 tok/s` | `164.8 tok/s` | `+43.9%` |
+| `Prefill/512` | `85.5 tok/s` | `109.9 tok/s` | `+28.5%` |
+
+The main reason this helps is memory traffic: the large projection weights are
+read constantly, and int8 storage cuts those reads by roughly 4x before scale
+loads and other overheads are considered.
+
 ## What Has Not Proven Worthwhile Yet
 
 Not every plausible optimization wins in this codebase.
@@ -205,3 +267,8 @@ One example: directly calling Apple Accelerate `sgemv` for the current single
 token decode workload turned out slower than the existing ARM64 SIMD path. The
 likely reason is that this runtime is dominated by many matrix-vector operations
 rather than large matrix-matrix workloads where BLAS usually shines more.
+
+Another example: dynamically quantizing activations to int8 for an
+`int8 x int8 -> int32` dot path did not earn its complexity here. The extra
+quantization work and scratch management outweighed the gains, so the retained
+path keeps activations float32 and stores only the weights as int8.
