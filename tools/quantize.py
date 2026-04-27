@@ -7,10 +7,10 @@ import numpy as np
 
 
 CHECKPOINT_MAGIC = 0x324C4D53
-CHECKPOINT_VERSION_F32 = 1
-CHECKPOINT_VERSION_TYPED = 2
+CHECKPOINT_VERSION_V1 = 1
+CHECKPOINT_VERSION_V2 = 2
 CHECKPOINT_HEADER_SIZE = 256
-WEIGHTS_INT8 = 1
+WEIGHT_TYPE_INT8 = 1
 
 
 def read_fp32(file, count):
@@ -41,7 +41,7 @@ def read_header(file):
     magic, version, dim, hidden_dim, n_layers, n_heads, n_kv_heads, vocab_size, seq_len, shared, rope_theta = struct.unpack_from(
         "<Iiiiiiiiiif", header
     )
-    if magic != CHECKPOINT_MAGIC or version != CHECKPOINT_VERSION_F32:
+    if magic != CHECKPOINT_MAGIC or version != CHECKPOINT_VERSION_V1:
         raise ValueError(f"expected SML2 fp32 v1 checkpoint, got magic={magic:#x} version={version}")
     return {
         "dim": dim,
@@ -60,7 +60,7 @@ def write_header(file, cfg):
     header = struct.pack(
         "<Iiiiiiiiiifi",
         CHECKPOINT_MAGIC,
-        CHECKPOINT_VERSION_TYPED,
+        CHECKPOINT_VERSION_V2,
         cfg["dim"],
         cfg["hidden_dim"],
         cfg["n_layers"],
@@ -70,7 +70,7 @@ def write_header(file, cfg):
         cfg["seq_len"],
         cfg["shared"],
         cfg["rope_theta"],
-        WEIGHTS_INT8,
+        WEIGHT_TYPE_INT8,
     )
     file.write(header)
     file.write(b"\0" * (CHECKPOINT_HEADER_SIZE - len(header)))

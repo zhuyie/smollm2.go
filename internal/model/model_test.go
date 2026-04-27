@@ -180,7 +180,7 @@ func TestQuantizedMatmulApproximatesFloat(t *testing.T) {
 	}
 }
 
-func TestQuantizeInt8ForwardApproximatesFloat(t *testing.T) {
+func TestRuntimeQuantizeInt8ForwardApproximatesFloat(t *testing.T) {
 	cfg := Config{
 		Dim:       8,
 		HiddenDim: 16,
@@ -193,7 +193,7 @@ func TestQuantizeInt8ForwardApproximatesFloat(t *testing.T) {
 	}
 	floatModel := newTestTransformer(cfg)
 	quantModel := newTestTransformer(cfg)
-	quantModel.QuantizeInt8()
+	quantModel.quantizeInt8()
 
 	floatLogits := floatModel.Forward(3, 0)
 	quantLogits := quantModel.Forward(3, 0)
@@ -204,7 +204,7 @@ func TestQuantizeInt8ForwardApproximatesFloat(t *testing.T) {
 	}
 }
 
-func TestQuantizeInt8PrefillApproximatesFloat(t *testing.T) {
+func TestRuntimeQuantizeInt8PrefillApproximatesFloat(t *testing.T) {
 	cfg := Config{
 		Dim:       8,
 		HiddenDim: 16,
@@ -217,7 +217,7 @@ func TestQuantizeInt8PrefillApproximatesFloat(t *testing.T) {
 	}
 	floatModel := newTestTransformer(cfg)
 	quantModel := newTestTransformer(cfg)
-	quantModel.QuantizeInt8()
+	quantModel.quantizeInt8()
 
 	tokens := []int{1, 5, 9, 3, 7}
 	floatLogits := floatModel.Prefill(tokens, 0)
@@ -328,7 +328,7 @@ func loadBenchmarkTransformerMode(b *testing.B, quantize bool) *Transformer {
 	b.Helper()
 	t := loadBenchmarkTransformer(b)
 	if quantize {
-		t.QuantizeInt8()
+		t.quantizeInt8()
 	}
 	return t
 }

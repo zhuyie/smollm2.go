@@ -172,18 +172,7 @@ func Load(path string) (*Transformer, error) {
 	weights.TokenEmbeddingTable = readFloat32s(file, cfg.VocabSize*cfg.Dim)
 	weights.Layers = make([]LayerWeights, cfg.NLayers)
 	if weightType == checkpointWeightsFP32 {
-		for i := range weights.Layers {
-			lw := &weights.Layers[i]
-			lw.RMSAttWeight = readFloat32s(file, cfg.Dim)
-			lw.WQ = readFloat32s(file, cfg.Dim*cfg.Dim)
-			lw.WK = readFloat32s(file, cfg.Dim*kvDim)
-			lw.WV = readFloat32s(file, cfg.Dim*kvDim)
-			lw.WO = readFloat32s(file, cfg.Dim*cfg.Dim)
-			lw.RMSFFNWeight = readFloat32s(file, cfg.Dim)
-			lw.W1 = readFloat32s(file, cfg.Dim*cfg.HiddenDim)
-			lw.W2 = readFloat32s(file, cfg.HiddenDim*cfg.Dim)
-			lw.W3 = readFloat32s(file, cfg.Dim*cfg.HiddenDim)
-		}
+		readFP32LayerWeights(file, cfg, kvDim, weights.Layers)
 		weights.RMSFinalWeight = readFloat32s(file, cfg.Dim)
 		if sharedWeights {
 			weights.WCls = weights.TokenEmbeddingTable
@@ -191,18 +180,7 @@ func Load(path string) (*Transformer, error) {
 			weights.WCls = readFloat32s(file, cfg.VocabSize*cfg.Dim)
 		}
 	} else if weightType == checkpointWeightsInt8 {
-		for i := range weights.Layers {
-			lw := &weights.Layers[i]
-			lw.RMSAttWeight = readFloat32s(file, cfg.Dim)
-			lw.QWQ = readQuantizedMatrixInt8(file, cfg.Dim, cfg.Dim)
-			lw.QWK = readQuantizedMatrixInt8(file, cfg.Dim, kvDim)
-			lw.QWV = readQuantizedMatrixInt8(file, cfg.Dim, kvDim)
-			lw.QWO = readQuantizedMatrixInt8(file, cfg.Dim, cfg.Dim)
-			lw.RMSFFNWeight = readFloat32s(file, cfg.Dim)
-			lw.QW1 = readQuantizedMatrixInt8(file, cfg.Dim, cfg.HiddenDim)
-			lw.QW2 = readQuantizedMatrixInt8(file, cfg.HiddenDim, cfg.Dim)
-			lw.QW3 = readQuantizedMatrixInt8(file, cfg.Dim, cfg.HiddenDim)
-		}
+		readInt8LayerWeights(file, cfg, kvDim, weights.Layers)
 		weights.RMSFinalWeight = readFloat32s(file, cfg.Dim)
 		weights.QWCls = readQuantizedMatrixInt8(file, cfg.Dim, cfg.VocabSize)
 	}
@@ -257,12 +235,40 @@ func readFloat32s(r io.Reader, count int) []float32 {
 	return data
 }
 
-func readQuantizedMatrixInt8(r io.Reader, n int, d int) *QuantizedMatrix {
+func readFP32LayerWeights(r io.Reader, cfg Config, kvDim int, layers []LayerWeights) {
+	for i := range layers {
+		lw := &layers[i]
+		lw.RMSAttWeight = readFloat32s(r, cfg.Dim)
+		lw.WQ = readFloat32s(r, cfg.Dim*cfg.Dim)
+		lw.WK = readFloat32s(r, cfg.Dim*kvDim)
+		lw.WV = readFloat32s(r, cfg.Dim*kvDim)
+		lw.WO = readFloat32s(r, cfg.Dim*cfg.Dim)
+		lw.RMSFFNWeight = readFloat32s(r, cfg.Dim)
+		lw.W1 = readFloat32s(r, cfg.Dim*cfg.HiddenDim)
+		lw.W2 = readFloat32s(r, cfg.HiddenDim*cfg.Dim)
+		lw.W3 = readFloat32s(r, cfg.Dim*cfg.HiddenDim)
+	}
+}
+
+func readInt8LayerWeights(r io.Reader, cfg Config, kvDim int, layers []LayerWeights) {
+	for i := range layers {
+		lw := &layers[i]
+		lw.RMSAttWeight = readFloat32s(r, cfg.Dim)
+		lw.QWQ = readQuantizedMatrixInt8(r, cfg.Dim, cfg.Dim)
+		lw.QWK = readQuantizedMatrixInt8(r, cfg.Dim, kvDim)
+		lw.QWV = readQuantizedMatrixInt8(r, cfg.Dim, kvDim)
+		lw.QWO = readQuantizedMatrixInt8(r, cfg.Dim, cfg.Dim)
+		lw.RMSFFNWeight = readFloat32s(r, cfg.Dim)
+		lw.QW1 = readQuantizedMatrixInt8(r, cfg.Dim, cfg.HiddenDim)
+		lw.QW2 = readQuantizedMatrixInt8(r, cfg.HiddenDim, cfg.Dim)
+		lw.QW3 = readQuantizedMatrixInt8(r, cfg.Dim, cfg.HiddenDim)
+	}
+}
+
+func readQuantizedMatrixInt8(r io.Reader, inputs int, rows int) *QuantizedMatrix {
 	q := &QuantizedMatrix{
-		Data:   readInt8s(r, n*d),
-		Scale:  readFloat32s(r, d),
-		Inputs: n,
-		Rows:   d,
+		Data:  readInt8s(r, inputs*rows),
+		Scale: readFloat32s(r, rows),
 	}
 	return q
 }

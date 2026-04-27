@@ -8,7 +8,7 @@ from transformers import AutoModelForCausalLM
 
 
 CHECKPOINT_MAGIC = 0x324C4D53  # "SML2" in little-endian bytes
-CHECKPOINT_VERSION = 1
+CHECKPOINT_VERSION_V1 = 1
 CHECKPOINT_HEADER_SIZE = 256
 
 
@@ -52,7 +52,7 @@ def export_hf(model_name, output_path):
         header = struct.pack(
             "<Iiiiiiiiiif",
             CHECKPOINT_MAGIC,
-            CHECKPOINT_VERSION,
+            CHECKPOINT_VERSION_V1,
             dim,
             hidden_dim,
             n_layers,

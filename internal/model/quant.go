@@ -14,16 +14,14 @@ const (
 var matmulInt8WorkPool sync.Pool
 
 type QuantizedMatrix struct {
-	Data   []int8
-	Scale  []float32
-	Inputs int
-	Rows   int
+	Data  []int8
+	Scale []float32
 }
 
-// QuantizeInt8 converts the dense projection weights to per-row symmetric int8.
+// quantizeInt8 converts the dense projection weights to per-row symmetric int8.
 // Token embeddings and normalization weights remain float32 because they are
 // read directly rather than consumed through matrix multiplication.
-func (t *Transformer) QuantizeInt8() {
+func (t *Transformer) quantizeInt8() {
 	cfg := t.Config
 	kvDim := cfg.Dim * cfg.NKVHeads / cfg.NHeads
 	for i := range t.Weights.Layers {
@@ -49,15 +47,13 @@ func (t *Transformer) QuantizeInt8() {
 	}
 }
 
-func quantizeMatrixInt8(w []float32, n int, d int) *QuantizedMatrix {
+func quantizeMatrixInt8(w []float32, inputs int, rows int) *QuantizedMatrix {
 	q := &QuantizedMatrix{
-		Data:   make([]int8, n*d),
-		Scale:  make([]float32, d),
-		Inputs: n,
-		Rows:   d,
+		Data:  make([]int8, inputs*rows),
+		Scale: make([]float32, rows),
 	}
-	for row := 0; row < d; row++ {
-		src := w[row*n : (row+1)*n]
+	for row := 0; row < rows; row++ {
+		src := w[row*inputs : (row+1)*inputs]
 		var maxAbs float32
 		for _, v := range src {
 			abs := float32(math.Abs(float64(v)))
@@ -70,7 +66,7 @@ func quantizeMatrixInt8(w []float32, n int, d int) *QuantizedMatrix {
 			scale = maxAbs / 127
 		}
 		q.Scale[row] = scale
-		dst := q.Data[row*n : (row+1)*n]
+		dst := q.Data[row*inputs : (row+1)*inputs]
 		invScale := float32(1) / scale
 		for i, v := range src {
 			quantized := int(math.Round(float64(v * invScale)))
