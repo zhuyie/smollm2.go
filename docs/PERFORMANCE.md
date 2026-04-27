@@ -65,7 +65,7 @@ run constantly during both prefill and decode.
 
 Code references:
 
-- [`internal/model/dot_arm64.s`](../internal/model/dot_arm64.s)
+- [`internal/model/kernel_arm64.s`](../internal/model/kernel_arm64.s)
 - [`internal/model/kernel_arm64.go`](../internal/model/kernel_arm64.go)
 
 The dominant math shape in this runtime is matrix-vector multiply:
@@ -132,7 +132,7 @@ Code references:
 
 - [`internal/model/model.go`](../internal/model/model.go)
 - [`internal/model/matmul.go`](../internal/model/matmul.go)
-- [`internal/model/dot_arm64.s`](../internal/model/dot_arm64.s)
+- [`internal/model/kernel_arm64.s`](../internal/model/kernel_arm64.s)
 - [`cmd/smollm2/main.go`](../cmd/smollm2/main.go)
 
 Prompt ingestion now uses `Transformer.Prefill` instead of repeatedly calling
@@ -210,7 +210,7 @@ Code references:
 - [`internal/model/quant.go`](../internal/model/quant.go)
 - [`internal/model/model.go`](../internal/model/model.go)
 - [`internal/model/kernel_arm64.go`](../internal/model/kernel_arm64.go)
-- [`internal/model/dot_arm64.s`](../internal/model/dot_arm64.s)
+- [`internal/model/kernel_arm64.s`](../internal/model/kernel_arm64.s)
 - [`tools/quantize.py`](../tools/quantize.py)
 
 The quantized path is intentionally narrow: projection matrices are stored as

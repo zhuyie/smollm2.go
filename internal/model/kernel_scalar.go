@@ -17,18 +17,6 @@ func dotF32Scalar(a []float32, b []float32) float32 {
 	return val
 }
 
-func matmulScalar(out []float32, x []float32, w []float32, n int, d int) {
-	out = out[:d]
-	x = x[:n]
-	w = w[:d*n]
-	for i := range out {
-		// Keep row slicing explicit so the compiler's BCE pass can prove bounds.
-		row := w[:n]
-		w = w[n:]
-		out[i] = dotF32Scalar(row, x)
-	}
-}
-
 func dotF32Batch4Scalar(x0 []float32, x1 []float32, x2 []float32, x3 []float32, w []float32) (float32, float32, float32, float32) {
 	var v0, v1, v2, v3 float32
 	for i, weight := range w {
@@ -55,6 +43,18 @@ func dotF32Int8Scalar(x []float32, w []int8) float32 {
 		val += x[i] * float32(w[i])
 	}
 	return val
+}
+
+func matmulScalar(out []float32, x []float32, w []float32, n int, d int) {
+	out = out[:d]
+	x = x[:n]
+	w = w[:d*n]
+	for i := range out {
+		// Keep row slicing explicit so the compiler's BCE pass can prove bounds.
+		row := w[:n]
+		w = w[n:]
+		out[i] = dotF32Scalar(row, x)
+	}
 }
 
 func addScaledF32Scalar(dst []float32, src []float32, scale float32) {
